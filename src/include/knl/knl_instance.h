@@ -101,6 +101,14 @@ const int MAX_AUDIT_NUM = 48;
 const int DB_CMPT_MAX = 5;
 #endif
 
+//我自己加的开始
+#ifdef __USE_NUMA
+extern "C" {
+#include <numa.h>
+}
+#endif
+//我自己加的结束
+
 enum knl_virtual_role {
     VUNKNOWN = 0,
     VCOORDINATOR = 1,
@@ -1597,5 +1605,121 @@ extern void add_numa_alloc_info(void* numaAddr, size_t length);
 #define DISABLE_MULTI_NODES_GPI (u_sess->attr.attr_storage.default_index_kind == DEFAULT_INDEX_KIND_NONE)
 #define DEFAULT_CREATE_LOCAL_INDEX (u_sess->attr.attr_storage.default_index_kind == DEFAULT_INDEX_KIND_LOCAL)
 #define DEFAULT_CREATE_GLOBAL_INDEX (u_sess->attr.attr_storage.default_index_kind == DEFAULT_INDEX_KIND_GLOBAL)
+
+//我自己加的开始
+#ifdef __USE_NUMA
+typedef struct NumaMemAllocView {
+    void* numaAddr;   // NUMA 内存块起始地址
+    void* freeAddr;   // 当前可用的指针
+    size_t length;    // NUMA 内存块总长度
+    size_t freeSize;  // 剩余可用大小
+    int node;         // NUMA 节点号
+} NumaMemAllocView;
+
+typedef struct knl_u_numa_context {
+    // bool inheritThreadPool; // Inherit NUMA node No. from thread pool module
+    NumaMemAllocView* numaAllocInfos;
+    size_t maxLength;
+    size_t allocIndex;
+} knl_u_numa_context;
+
+//knl_u_numa_context numa_cxt;
+
+class NumaManager {
+public:
+    NumaManager() {
+        numa_cxt.numaAllocInfos = nullptr;
+        numa_cxt.maxLength = 0;
+        numa_cxt.allocIndex = 0;
+    }
+
+void initial(){
+    // 初始化 numaAllocInfos 数组
+    size_t initial_size = 4; // 初始大小
+    this->numa_cxt.numaAllocInfos = 
+        (NumaMemAllocView*)mmgr_alloc(initial_size * sizeof(NumaMemAllocView));
+    // if (!this->numa_cxt.numaAllocInfos) {
+    //     ereport(ERROR, (errmsg("Failed to allocate NUMA metadata array")));
+    // }
+    for(int i =0; i< 4; i++){
+        this->numa_cxt.numaAllocInfos[i].numaAddr = nullptr;
+        this->numa_cxt.numaAllocInfos[i].freeAddr = nullptr;
+        this->numa_cxt.numaAllocInfos[i].length = 0;
+        this->numa_cxt.numaAllocInfos[i].freeSize = 0;
+    }
+    this->numa_cxt.maxLength = initial_size;
+    this->numa_cxt.allocIndex = 0;
+}
+
+void stream_add_numa_alloc_info(void* numaAddr, size_t length, int node){
+    if (this->numa_cxt.allocIndex >= this->numa_cxt.maxLength) {
+        size_t newLength = this->numa_cxt.maxLength * 2;
+            this->numa_cxt.numaAllocInfos = (NumaMemAllocView*)mmgr_realloc(
+            this->numa_cxt.numaAllocInfos, 
+            newLength * sizeof(NumaMemAllocView)
+        );
+        this->numa_cxt.numaAllocInfos[this->numa_cxt.allocIndex].numaAddr = nullptr;
+        this->numa_cxt.numaAllocInfos[this->numa_cxt.allocIndex].freeAddr = nullptr;
+        this->numa_cxt.numaAllocInfos[this->numa_cxt.allocIndex].length = 0;
+        this->numa_cxt.numaAllocInfos[this->numa_cxt.allocIndex].freeSize = 0;
+        this->numa_cxt.maxLength = newLength;
+
+    }
+    this->numa_cxt.numaAllocInfos[this->numa_cxt.allocIndex].numaAddr = numaAddr;
+    this->numa_cxt.numaAllocInfos[this->numa_cxt.allocIndex].freeAddr = numaAddr;
+    
+    this->numa_cxt.numaAllocInfos[this->numa_cxt.allocIndex].length = length;
+    this->numa_cxt.numaAllocInfos[this->numa_cxt.allocIndex].freeSize = length;
+    this->numa_cxt.numaAllocInfos[this->numa_cxt.allocIndex].node = node;
+    ++this->numa_cxt.allocIndex;
+}
+
+
+// 从指定节点分配小块内存
+void* allocate_from_numa(int node, size_t size) {
+    for (size_t i = 0; i < this->numa_cxt.allocIndex; i++) {
+        NumaMemAllocView* info = &this->numa_cxt.numaAllocInfos[i];
+        if (info->node == node && info->freeSize >= size) {
+            void* allocated_addr = info->freeAddr;  // 当前可用地址
+            info->freeAddr = (char*)info->freeAddr + size;  // 更新可用地址
+            info->freeSize -= size;                 // 更新剩余大小
+            return allocated_addr;
+        }
+    }
+    const size_t DEFAULT_CHUNK_SIZE = 256 * 1024 * 512; // 默认256MB
+    size_t chunk_size = std::max(size * 2, DEFAULT_CHUNK_SIZE);
+
+    // 分配新的NUMA内存块
+    // printf("重新分配内存块 %lu\n",chunk_size);
+    numa_free(numa_buffer[node],DEFAULT_CHUNK_SIZE);
+
+    numa_buffer[node] = numa_alloc_onnode(chunk_size, node);
+
+    stream_add_numa_alloc_info(numa_buffer[node], chunk_size, node);
+    // 从新块中分配（此时必定成功）
+    NumaMemAllocView* new_info = &this->numa_cxt.numaAllocInfos[this->numa_cxt.allocIndex];
+    new_info->node = node;
+    new_info->numaAddr = numa_buffer[node];
+    new_info->freeAddr = numa_buffer[node];
+    new_info->length = chunk_size;
+    void* allocated_addr = new_info->freeAddr;
+    new_info->freeAddr = (char*)new_info->freeAddr + size;
+    new_info->freeSize -= size;
+
+    return allocated_addr;
+}
+
+void free_buffer(){
+    for (size_t i = 0; i < this->numa_cxt.allocIndex; i++) {
+            NumaMemAllocView* info = &this->numa_cxt.numaAllocInfos[i];
+            numa_free(numa_buffer[i],info->length);
+    }
+}
+
+private:
+    knl_u_numa_context numa_cxt;
+};
+#endif
+//我自己加的结束
 
 #endif /* SRC_INCLUDE_KNL_KNL_INSTANCE_H_ */

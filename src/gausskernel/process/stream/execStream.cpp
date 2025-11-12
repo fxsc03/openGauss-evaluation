@@ -2145,6 +2145,7 @@ bool ScanStreamByLibcomm(StreamState* node)
 
 bool ScanMemoryStream(StreamState* node)
 {
+    // elog(LOG,"StreamplanNodeId %d",node->sharedContext->key_s.planNodeId);
     Assert(((Stream*)(node->ss.ps.plan))->sort == NULL);
     while (node->conn_count) {
         if (node->need_fresh_data) {

@@ -996,10 +996,11 @@ bool CStore::NeedLoadCUDesc(int32& cudesc_idx)
 // if we load all CUDesc once, the memory will not enough.
 // So we load CUdesc once for max_loaded_cudesc
 void CStore::LoadCUDescIfNeed()
-{
+{    
+    // printf("[DEBUG] Entering LoadCUDescIfNeed");
     uint32 last_load_num = 0;
     int32 cudesc_idx = 0;  // cudesc_idx set 0 when  buffer io, and  set to m_NumCUDescIdx when adio
-
+    
     if (!NeedLoadCUDesc(cudesc_idx)) {
         return;
     }
@@ -1071,6 +1072,12 @@ void CStore::LoadCUDescIfNeed()
                                 m_colNum,
                                 m_NumLoadCUDesc,
                                 m_prefetch_quantity)));
+                // elog(LOG, "[CUDesc] Loaded %d CUDescs for %d columns, prefetch quantity = %ld, threshold = %ld, max_loaded_cudesc = %d",
+                //         m_NumLoadCUDesc,
+                //         m_colNum,
+                //         m_prefetch_quantity,
+                //         m_prefetch_threshold,
+                //         u_sess->attr.attr_storage.max_loaded_cudesc);
             }
             break;
         }
@@ -1102,7 +1109,12 @@ void CStore::LoadCUDescIfNeed()
 
     // Load new CUs need do rough check
     m_needRCheck = true;
-
+// elog(LOG, "[CUDesc] Loaded %d CUDescs for %d columns. Prefetch: %ld / %ld. Max: %d",
+//      m_NumLoadCUDesc,
+//      m_colNum,
+//      m_prefetch_quantity,
+//      m_prefetch_threshold,
+//      u_sess->attr.attr_storage.max_loaded_cudesc);
     // before RoughCheck, m_NumCUDescIdx is length of loaded CUDesc info
     BFIO_RUN()
     {

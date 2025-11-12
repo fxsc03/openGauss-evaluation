@@ -29,6 +29,15 @@
 #include "vecexecutor/vecagg.h"
 #include "vectorsonic/vsonichash.h"
 #include "vectorsonic/vsonicpartition.h"
+#include <map>      // 支持 std::map
+#include <vector>   // 如果之前还有 std::vector 报错
+#include <numeric>    // std::accumulate
+#include <algorithm>  // std::max_element, std::min_element
+#include <cstdio>
+#include <cstdint>
+#include <atomic>
+#include <mutex>
+
 
 class SonicHashAgg : public SonicHash {
 public:
@@ -58,6 +67,29 @@ public:
         else
             return 0;
     }
+    // //void BatchAggregation(VectorBatch* batch);
+    // int m_parallel_degree = 1;  // 默认值可根据需要调整
+    // static std::vector<size_t> group_access_counters;  // 分组访问计数
+    // static std::mutex probe_perf_mutex;  // 保护共享数据的锁
+    // static std::vector<double> thread_agg_times;       // 每个线程累计时间 (ns)
+    // static std::vector<size_t> thread_processed_rows;  // 每个线程处理行数
+    // struct ThreadArg {
+    // int thread_id;
+    // double exec_time_ns;
+    // void (*func)(int);  // 每个线程执行的函数
+    // };
+    // void analyze_probe_scalability(int num_threads) ;
+    // void analyze_aggregation_access_pattern();
+    // void analyze_compute_memory_ratio();
+    // void analyze_workload_balance(int num_threads);
+    // void analyze_q1_specific_bottlenecks();
+    // void analyze_vectorization_efficiency();
+    // void analyze_cache_efficiency(size_t total_groups, int agg_num) ;
+    // std::vector<double> get_thread_execution_times(int num_threads);
+    // void analyze_aggregation_access(VecAggInfo* aggInfo, ScalarVector* vec, int aggIdx, int nrows);
+    // void record_probe_performance(int thread_id, uint64_t duration_ns, int nrows);
+    // double estimate_agg_complexity(VecAggInfo* aggInfo);
+    // //void analyze_parallel_efficiency(int parallel_degree);
 
 private:
     /*

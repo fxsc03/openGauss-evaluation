@@ -142,8 +142,11 @@ int StreamMain()
 
         /* Wait thread ID ready */
         u_sess->stream_cxt.producer_obj->waitThreadIdReady();
-
+        // u_sess->stream_cxt.trace_cache_obj = new ThreadPerfCacheProfiler();
+        //u_sess->stream_cxt.trace_tsc_obj = new ThreadTSCProfiler();
         execute_stream_plan(u_sess->stream_cxt.producer_obj);
+        // elog(LOG,"nodeid %d",u_sess->stream_cxt.producer_obj->m_streamNode->scan.plan.plan_node_id);
+        // u_sess->stream_cxt.trace_cache_obj->print_average_stats();
         execute_stream_end(u_sess->stream_cxt.producer_obj);
         WLMReleaseNodeFromHash();
         WLMReleaseIoInfoFromHash();
@@ -414,7 +417,7 @@ static void execute_stream_plan(StreamProducer* producer)
      * will normally change current memory context.)
      */
     start_xact_command();
-
+    // elog(LOG,"PARENT ID %d\n",producer->getParentPlanNodeId());
     producer->setUpStreamTxnEnvironment();
 
     PlannedStmt* planstmt = producer->getPlan();

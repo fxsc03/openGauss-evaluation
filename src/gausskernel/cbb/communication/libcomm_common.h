@@ -21,7 +21,7 @@
  */
 #ifndef _GS_LIBCOMM_COMMON_H_
 #define _GS_LIBCOMM_COMMON_H_
-
+#include <chrono>
 #include <stddef.h>
 #include <errno.h>
 #include <unistd.h>
@@ -284,6 +284,11 @@ struct binary_semaphore {
     int waiting_count;      // waiting threads count
     int b_destroy;
     int destroy_wait;       // destroy need wait someone done
+    // 添加统计字段 - 不需要原子操作，因为有mutex保护
+    uint64_t total_wakeup_latency;  // 总唤醒延迟(ns)
+    uint64_t wakeup_count;          // 唤醒次数
+    uint64_t max_wakeup_latency;    // 最大唤醒延迟(ns)
+    std::chrono::steady_clock::time_point last_signal_time; // 最近一次signal时间
     int init();
     int destroy(bool do_destroy = false);
     void reset();
@@ -293,6 +298,10 @@ struct binary_semaphore {
     void destroy_wait_add();
     void destroy_wait_sub();
     int timed_wait(int timeout);
+    // 添加统计方法
+    void print_statistics();
+    void get_statistics(uint64_t* avg_latency, uint64_t* max_latency, uint64_t* count);
+
 };
 
 // hash keys and hash entries
@@ -314,6 +323,8 @@ struct hash_entry {
     void _wait();
     void _hold_destroy();
     void _release_destroy();
+    void _print_statistics();
+    void _get_statistics(uint64_t* avg_latency, uint64_t* max_latency, uint64_t* count);
     // The parameter timeout should be in second, if it is minus or zero, the function is the same as _wait.
     int _timewait(int timeout);
 };

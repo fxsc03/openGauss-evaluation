@@ -1608,7 +1608,8 @@ static void xml_append_errbuf(xmlErrorPtr error, const xmlChar* name, StringInfo
 /*
  * Error handler for libxml errors and warnings
  */
-static void xml_error_handler(void* data, xmlErrorPtr error)
+// static void xml_error_handler(void* data, xmlErrorPtr error)/
+static void xml_error_handler(void *data, const xmlError *error)
 {
     PgXmlErrorContext* xmlerrcxt = (PgXmlErrorContext*)data;
     xmlParserCtxtPtr ctxt = (xmlParserCtxtPtr)error->ctxt;

@@ -21,6 +21,11 @@
  *
  * -------------------------------------------------------------------------
  */
+#include <chrono>
+#include<vector>
+#include <unordered_map>
+#include <time.h>
+#include <set>
 #include "vectorsonic/vsonichashagg.h"
 #include "vectorsonic/vsonicarray.h"
 #include "catalog/pg_aggregate.h"
@@ -776,7 +781,9 @@ void SonicHashAgg::initHashTable()
 
     /* hash header : first need to decide use segment hash table or not */
     m_useSegHashTbl = (uint64)(sizeof(uint32) * m_hashSize) >= (uint64)MaxAllocSize;
+    // size_t total_memory = 0;
     if (m_useSegHashTbl) {
+        // total_memory += sizeof(uint32) * m_hashSize;  // 分段哈希表的总大小
         /* how many segment we need, each segment is one atom */
         m_segBucket = New(m_memControl.hashContext)
             SonicIntTemplateDatumArray<uint32>(m_memControl.hashContext, m_atomSize, false, &desc);
@@ -786,6 +793,7 @@ void SonicHashAgg::initHashTable()
         for (int i = 0; i < m_segNum; i++)
             m_segBucket->genNewArray(false);
     } else {
+        // total_memory += sizeof(uint32) * m_hashSize;  // 普通哈希桶
         m_bucket = (char*)palloc0(sizeof(uint32) * m_hashSize);
     }
 
@@ -797,7 +805,22 @@ void SonicHashAgg::initHashTable()
     errno_t rc =
         memset_s(m_next->m_curAtom->data, m_next->m_atomSize * m_next->m_atomTypeSize, 0, m_next->m_atomTypeSize);
     securec_check(rc, "", "");
-
+    // 2. m_hash数组内存
+    // total_memory += m_atomSize * sizeof(uint32);
+    // 3. m_next数组内存  
+    // total_memory += m_atomSize * sizeof(uint32);
+    
+    // 4. 其他固定开销估算
+    // total_memory += sizeof(uint32) * m_atomSize;  // 预留其他数据结构
+    
+    // double memory_mb = (double)total_memory / (1024 * 1024);
+    
+    // printf("[HashTable Init] Size: %u, Memory: %.2f MB, Segmented: %s\n",
+    //        m_hashSize, memory_mb, m_useSegHashTbl ? "Yes" : "No");
+    // printf("[Memory Pre-alloc] Buckets: %.2f MB, HashArray: %.2f MB, NextArray: %.2f MB\n",
+    //        (double)(sizeof(uint32) * m_hashSize) / (1024 * 1024),
+    //        (double)(m_atomSize * sizeof(uint32)) / (1024 * 1024),
+    //        (double)(m_atomSize * sizeof(uint32)) / (1024 * 1024));
     /*
      * when we have a new atom for keyvalue(m_data), we also create new atom for hashval(m_hash)
      * and position (m_next).
@@ -992,8 +1015,12 @@ VectorBatch* SonicHashAgg::Run()
 
             /* Fetch data from hash table and return result */
             case AGG_FETCH: {
+                // auto probe_start = std::chrono::high_resolution_clock::now();
                 res = Probe();
-
+                // auto probe_end = std::chrono::high_resolution_clock::now();
+                // auto probe_duration = std::chrono::duration_cast<std::chrono::microseconds>(probe_end - probe_start);
+                // double probe_time_ms = probe_duration.count() / 1000.0;
+                // printf("hash agg probe time %.3fms\n",probe_time_ms);
                 if (BatchIsNull(res)) {
                     /* If not matched, turn to next partition */
                     if (true == m_memControl.spillToDisk) {
@@ -1030,6 +1057,7 @@ void SonicHashAgg::Build()
     WaitState oldStatus = pgstat_report_waitstatus(STATE_EXEC_HASHAGG_BUILD_HASH);
     for (;;) {
         outer_batch = m_sonicHashSource->getBatch();
+        //u_sess->stream_cxt.trace_tsc_obj->start();
         if (unlikely(BatchIsNull(outer_batch))) {
             break;
         }
@@ -1038,11 +1066,12 @@ void SonicHashAgg::Build()
         tryExpandHashTable();
 
         (this->*m_buildFun)(outer_batch);
+        //u_sess->stream_cxt.trace_tsc_obj->stop();
     }
     (void)pgstat_report_waitstatus(oldStatus);
 
     /* record state of sonic hashagg */
-    if (HAS_INSTR(&m_runtime->ss, false)) {
+    // if (HAS_INSTR(&m_runtime->ss, false)) {
         if (m_tupleCount > 0) {
             m_runtime->ss.ps.instrument->width = (int)(m_colWidth / m_tupleCount);
         } else {
@@ -1053,7 +1082,36 @@ void SonicHashAgg::Build()
         m_runtime->ss.ps.instrument->sysBusy = m_memControl.sysBusy;
         m_runtime->ss.ps.instrument->sorthashinfo.hashbuild_time = m_hashbuild_time;
         m_runtime->ss.ps.instrument->sorthashinfo.hashagg_time = m_calcagg_time;
-    }
+
+
+        // int curr_cpu = sched_getcpu();
+        // elog(LOG,
+        //     "[CPU %d VecSonicHashAgg(%d)] smp %d:  Hash table size is %.4f MB, m_rows :%ld build_time %.3f, agg_time %.3f.",
+        //     curr_cpu,
+        //     m_runtime->ss.ps.plan->plan_node_id,
+        //     // m_hashSize,
+        //     u_sess->stream_cxt.smp_id,
+        //     // group_positions.size(),
+        //     (double)(sizeof(uint32) * m_hashSize) / (1024 * 1024),
+        //     m_rows,
+        //     m_hashbuild_time,
+        //     m_calcagg_time
+        //     );
+    // }
+    // elog(LOG,
+    //         "[CPU %d VecSonicHashAgg(%d)] smp %d:  Hash table size is %.4f MB, m_rows :%ld build_time %.3f, agg_time %.3f.",
+    //         curr_cpu,
+    //         m_runtime->ss.ps.plan->plan_node_id,
+    //         // m_hashSize,
+    //         u_sess->stream_cxt.smp_id,
+    //         // group_positions.size(),
+    //         (double)(sizeof(uint32) * m_hashSize) / (1024 * 1024),
+    //         m_rows,
+    //         m_hashbuild_time,
+    //         m_calcagg_time
+    //         );
+    //elog(LOG,"-----------VecSonicHashAgg(%d)-----------", m_runtime->ss.ps.plan->plan_node_id);
+    //u_sess->stream_cxt.trace_tsc_obj->print_stats();
 }
 
 /*
@@ -1329,6 +1387,32 @@ bool SonicHashAgg::matchValue(ScalarVector* pVector, uint16 keyIdx, int16 pVecto
         notnull_check = notnull_check && (bool)m_equalFuncs[keyIdx].fn_addr(&fcinfo);
     }
 
+    // if (cmpIdx % 5000 == 0) {
+    // printf("[ProbeMatch][Thread %lu][smpid=%ld] "
+    //        "keyIdx=%u cmpIdx=%u val=0x%lx flag=%u pVal=0x%lx pFlag=%u\n",
+    //        gs_thread_self(),
+    //        u_sess->stream_cxt.smp_id,
+    //        keyIdx,
+    //        cmpIdx,
+    //        val, flag,
+    //        pVector->m_vals[pVectorIdx],
+    //        pVector->m_flag[pVectorIdx]);
+    // }
+    // if (cmpIdx % 5000 == 0) {
+    // elog(LOG,
+    //      "[ProbeMatch][Thread %lu][smpid=%ld] "
+    //      "keyIdx=%u cmpIdx=%u val=0x%lx flag=%u pVal=0x%lx pFlag=%u",
+    //      gs_thread_self(),
+    //      u_sess->stream_cxt.smp_id,
+    //      keyIdx,
+    //      cmpIdx,
+    //      val,
+    //      flag,
+    //      pVector->m_vals[pVectorIdx],
+    //      pVector->m_flag[pVectorIdx]);
+    // }
+
+
     return (notnull_check || null_check);
 }
 
@@ -1388,8 +1472,18 @@ void SonicHashAgg::buildAggTblBatch(VectorBatch* batch)
     uint32 hash_loc;
     uint32 data_loc;
     uint32 current_loc;
-
+    // ============ 缓存性能测试开始 ============
+    // static size_t total_accesses = 0;
+    // static size_t fast_accesses = 0;  // 缓存命中
+    // static size_t total_batches = 0;
+    // instr_time cache_test_start;
+    // static std::vector<size_t> bucket_access_count(1024); // 桶访问计数
+    // static size_t total_hot_bucket_accesses{0};
+    // INSTR_TIME_SET_CURRENT(cache_test_start);
+    // std::set<uint32_t> group_positions;
+    // u_sess->stream_cxt.trace_cache_obj->start();
     INSTR_TIME_SET_CURRENT(start_time);
+
 
     /* the hash table may be resized yet */
 #ifdef USE_PRIME
@@ -1412,6 +1506,9 @@ void SonicHashAgg::buildAggTblBatch(VectorBatch* batch)
 #else
         hash_loc = hash_val[i] & mask;
 #endif
+        // ============ 单个内存访问计时 ============
+        // instr_time access_start;
+        // INSTR_TIME_SET_CURRENT(access_start);
 
         if (!useSegHashTable) {
             data_loc = ((uint32*)m_bucket)[hash_loc];
@@ -1428,8 +1525,58 @@ void SonicHashAgg::buildAggTblBatch(VectorBatch* batch)
         m_bucketLoc[i] = hash_loc;
         m_loc[i] = data_loc;
         m_orgLoc[i] = data_loc;
-    }
+        // if(m_loc[i] !=0 ){
+        //     group_positions.insert(m_loc[i]);
+        // }
+        // total_accesses++;
+        // // 假设访问时间 < 100纳秒为缓存命中，> 500纳秒为缓存缺失
+        // if (access_time < 0.03) {
+        //     fast_accesses++;
+        // }
+        // size_t current_count = ++bucket_access_count[hash_loc];
+        // if (current_count > 100) { // 热点桶阈值
+        //     total_hot_bucket_accesses++;
+        // }
+        // 每10个批次输出一次缓存统计
+       
 
+    }
+    
+    // u_sess->stream_cxt.trace_cache_obj->print_stats();
+    // double access_time = elapsed_time(&access_start) * 1e6; // 微秒
+    // u_sess->stream_cxt.ht_access+=access_time;
+    // u_sess->stream_cxt.tt_rows+=rows;
+    // double batch_cache_time = elapsed_time(&cache_test_start) * 1000; // 毫秒
+    // double cache_hit_rate = (double)fast_accesses / total_accesses * 100;
+    // double avg_access_time = (batch_cache_time * 1000) / rows; // 微秒/访问
+    // size_t hot_buckets = 0;
+    // size_t total_active_buckets = 0;
+    // size_t max_bucket_accesses = 0;
+    
+    // for (size_t i = 0; i < 1024; i++) {
+    //     if (bucket_access_count[i] > 0) {
+    //         total_active_buckets++;
+    //         if (bucket_access_count[i] > rows / 10) { // 热点桶定义
+    //             hot_buckets++;
+    //         }
+    //         if (bucket_access_count[i] > max_bucket_accesses) {
+    //             max_bucket_accesses = bucket_access_count[i];
+    //         }
+    //     }
+    // }
+    //  double hot_bucket_ratio = total_active_buckets > 0 ? 
+    //     (double)hot_buckets / total_active_buckets * 100 : 0;
+    //     elog(LOG, "Access Distribution: ActiveBuckets=%zu, HotBuckets=%zu(%.1f%%)", 
+    //      total_active_buckets, hot_buckets, hot_bucket_ratio);
+    //     elog(LOG, "Cache Stats: HitRate=%.1f%%, AvgAccess=%.3fus, Accesses=%zu", 
+    //         cache_hit_rate, avg_access_time, total_accesses);
+        
+    //     // 根据性能特征给出诊断
+    //     if (cache_hit_rate < 80.0) {
+    //         elog(LOG, " 🔴 POOR CACHE PERFORMANCE: High cache miss rate");
+    //     } else if (cache_hit_rate > 95.0) {
+    //         elog(LOG, " ✅ EXCELLENT CACHE PERFORMANCE");
+    //     }
     /* m_loc record the final right agg location. this must be a convergence process */
     int matched = 0;
     while (m_suspectNum != 0) {
@@ -1437,17 +1584,30 @@ void SonicHashAgg::buildAggTblBatch(VectorBatch* batch)
 
         rc = memset_s(m_match, BatchMaxSize * sizeof(bool), true, m_suspectNum * sizeof(bool));
         securec_check(rc, "", "");
-
+        // // ============ 冲突解析缓存测试 ============
+        // instr_time conflict_start;
+        // INSTR_TIME_SET_CURRENT(conflict_start);
         /* check hash match */
         for (j = 0; j < m_buildOp.keyNum; j++) {
             RuntimeBinding(m_arrayKeyMatch, j)(&batch->m_arr[m_buildOp.keyIndx[j]], j, m_suspectNum);
         }
+        // double conflict_time = elapsed_time(&conflict_start) * 1000; // 毫秒
 
         /* refresh the next loc */
         for (i = 0; i < m_suspectNum; i++) {
             if (!m_match[i]) {
                 miss_idx = m_suspectIdx[i];
                 data_loc = m_next->getNthDatum(m_loc[miss_idx]);
+
+                //             // ============ 链表遍历缓存测试 ============
+                // instr_time list_start;
+                // INSTR_TIME_SET_CURRENT(list_start);
+                
+                // double list_access_time = elapsed_time(&list_start) * 1e6; // 微秒
+                // if (list_access_time > 1.0) { // 链表访问较慢
+                //     elog(LOG, "Slow list access: %.3f us at loc %u", list_access_time, m_loc[miss_idx]);
+                // }
+
                 if (data_loc) {
                     m_suspectIdx[krows++] = miss_idx;
 
@@ -1519,6 +1679,7 @@ void SonicHashAgg::buildAggTblBatch(VectorBatch* batch)
     m_hashbuild_time += elapsed_time(&start_time);
 
     INSTR_TIME_SET_CURRENT(start_time);
+    // u_sess->stream_cxt.trace_cache_obj->stop();
     if (m_runtime->jitted_sonicbatchagg) {
         if (HAS_INSTR(&m_runtime->ss, false)) {
             m_runtime->ss.ps.instrument->isLlvmOpt = true;
@@ -1528,8 +1689,28 @@ void SonicHashAgg::buildAggTblBatch(VectorBatch* batch)
         ((vsonicbatchagg_func)(m_runtime->jitted_sonicbatchagg))(this, batch, m_aggIdx);
     } else {
         BatchAggregation(batch);
+        // ===================== 集成 probe 阶段全局分析 =====================
+        // if (batches_processed % 10 == 0 || batches_processed == 1) {
+        //     analyze_probe_scalability(m_parallel_degree);  // 多线程性能分析
+        //     analyze_q1_specific_bottlenecks();            // 查询特定分析
+        // }
+        // ==============================================================
     }
     m_calcagg_time += elapsed_time(&start_time);
+    
+    // if(m_runtime->ss.ps.plan->plan_node_id == 6){
+            // elog(LOG,
+            // "[CPU %d VecSonicHashAgg(%d)] smp %d: groups %d Hash table size is %.4f MB, m_rows :%ld.",
+            // curr_cpu,
+            // m_runtime->ss.ps.plan->plan_node_id,
+            // // m_hashSize,
+            // u_sess->stream_cxt.smp_id,
+            // // group_positions.size(),
+            // (double)(sizeof(uint32) * m_hashSize) / (1024 * 1024),
+            // m_rows
+            // );
+    // }
+
 }
 
 /*
@@ -1538,55 +1719,524 @@ void SonicHashAgg::buildAggTblBatch(VectorBatch* batch)
  * @in hashLoc	: The position of m_bucket.
  * @return		:
  */
+// int64 SonicHashAgg::insertHashTbl(VectorBatch* batch, int idx, uint32 hashval, uint32 hashLoc)
+// {
+//     // === Add this for debugging ===
+//     printf("[Debug] Thread %lu: SonicHashAgg=%p, m_bucket=%p, m_segBucket=%p, m_rows=%ld\n",
+//            gs_thread_self(),
+//            this,
+//            m_bucket,
+//            m_segBucket,
+//            m_rows);
+//     fflush(stdout);
+//     // ==============================
+//     int i;
+//     int64 extra_size_needed = 0;
+//     ScalarVector* scalar_vec = NULL;
+
+//     m_rows++;
+
+//     /* input hash key value */
+//     for (i = 0; i < m_hashNeed; i++) {
+//         scalar_vec = &batch->m_arr[m_hashInBatchIdx[i]];
+//         m_data[i]->putArray(&scalar_vec->m_vals[idx], &scalar_vec->m_flag[idx], 1);
+
+//         if (likely(NOT_NULL(scalar_vec->m_flag[idx]))) {
+//             if (m_tupleCount >= 0 && scalar_vec->m_desc.encoded) {
+//                 extra_size_needed += VARSIZE_ANY(scalar_vec->m_vals[idx]);
+//             }
+//         }
+//     }
+//     m_colWidth += extra_size_needed;
+
+//     /* set the init agg value */
+//     for (i = 0; i < m_aggNum; i++) {
+//         uint64 init_val = 0;
+//         uint8 init_flag = V_NULL_MASK;
+//         m_data[m_aggIdx[i]]->putArray(&init_val, &init_flag, 1);
+
+//         if (m_runtime->aggInfo[i].vec_final_function.flinfo != NULL) {
+//             m_data[m_aggIdx[i] + 1]->putArray(&init_val, &init_flag, 1);
+//         }
+//     }
+
+//     /* restore hashval */
+//     Datum tmp_hashval = UInt32GetDatum(hashval);
+//     m_hash->putArray((ScalarValue*)&tmp_hashval, NULL, 1);
+
+//     /* update hash table */
+//     if (likely(!m_useSegHashTbl)) {
+//         m_next->putArray((Datum*)&(((uint32*)m_bucket)[hashLoc]), NULL, 1);
+//         ((uint32*)m_bucket)[hashLoc] = m_rows;
+//     } else {
+//         uint32 bucket_pos = (uint32)m_segBucket->getNthDatum(hashLoc);
+//         m_next->putArray((Datum*)&(bucket_pos), NULL, 1);
+//         m_segBucket->setNthDatum(hashLoc, (ScalarValue*)&m_rows);
+//     }
+
+//     m_loc[idx] = m_rows;
+
+//     return extra_size_needed;
+// }
+// int64 SonicHashAgg::insertHashTbl(VectorBatch* batch, int idx, uint32 hashval, uint32 hashLoc)
+// {
+//     int i;
+//     int64 extra_size_needed = 0;
+//     ScalarVector* scalar_vec = NULL;
+
+//     // -----------------------------
+//     // 每 1000 行输出一次日志，打印线程和 SMP ID
+//     // -----------------------------
+//     if ((m_rows % 1000) == 0) {
+//         printf("[SonicHashAgg] Thread %lu, smpid=%ld, inserting row %ld\n",
+//                gs_thread_self(), u_sess->stream_cxt.smpidint64, m_rows);
+//     }
+
+//     // 打印基础信息
+//     printf("\n[Debug] Thread %lu\n", gs_thread_self());
+//     printf("  SonicHashAgg=%p, m_bucket=%p, m_segBucket=%p, m_rows(before)=%ld\n",
+//            this, m_bucket, m_segBucket, m_rows + 1);
+//     printf("  hashval = %u | hashLoc = %u\n", hashval, hashLoc);
+
+//     if (!m_useSegHashTbl) {
+//         printf("  [Before] bucket[%u] = %u\n", hashLoc, ((uint32*)m_bucket)[hashLoc]);
+//     } else {
+//         printf("  [Before] segBucket[%u] = %u\n", hashLoc, (uint32)m_segBucket->getNthDatum(hashLoc));
+//     }
+
+//     m_rows++;
+
+//     /* 输入哈希键 */
+//     for (i = 0; i < m_hashNeed; i++) {
+//         scalar_vec = &batch->m_arr[m_hashInBatchIdx[i]];
+//         ScalarValue keyVal = scalar_vec->m_vals[idx];
+//         uint8 keyFlag = scalar_vec->m_flag[idx];
+//         m_data[i]->putArray(&keyVal, &keyFlag, 1);
+
+//         if (likely(NOT_NULL(keyFlag))) {
+//             if (m_tupleCount >= 0 && scalar_vec->m_desc.encoded) {
+//                 extra_size_needed += VARSIZE_ANY(keyVal);
+//             }
+//         }
+
+//         // 打印 key 值
+//         if (IS_NULL(keyFlag)) {
+//             printf("  key[%d] = NULL\n", i);
+//         } else {
+//             switch (scalar_vec->m_desc.typeId) {
+//                 case INT4OID:
+//                     printf("  key[%d] (INT4) = %d\n", i, DatumGetInt32(keyVal));
+//                     break;
+//                 case INT8OID:
+//                     printf("  key[%d] (INT8) = %ld\n", i, DatumGetInt64(keyVal));
+//                     break;
+//                 default:
+//                     printf("  key[%d] (type=%u, raw=0x%lx)\n", i, scalar_vec->m_desc.typeId, keyVal);
+//                     break;
+//             }
+//         }
+//     }
+
+//     m_colWidth += extra_size_needed;
+
+//     /* 初始化聚合值 */
+//     for (i = 0; i < m_aggNum; i++) {
+//         uint64 init_val = 0;
+//         uint8 init_flag = V_NULL_MASK;
+//         m_data[m_aggIdx[i]]->putArray(&init_val, &init_flag, 1);
+
+//         if (m_runtime->aggInfo[i].vec_final_function.flinfo != NULL) {
+//             m_data[m_aggIdx[i] + 1]->putArray(&init_val, &init_flag, 1);
+//         }
+//     }
+
+//     /* 存储哈希值 */
+//     Datum tmp_hashval = UInt32GetDatum(hashval);
+//     m_hash->putArray((ScalarValue*)&tmp_hashval, NULL, 1);
+
+//     /* 更新哈希表 */
+//     if (likely(!m_useSegHashTbl)) {
+//         uint32 old_head = ((uint32*)m_bucket)[hashLoc];
+//         m_next->putArray((Datum*)&old_head, NULL, 1);
+//         ((uint32*)m_bucket)[hashLoc] = m_rows;
+//         printf("  [After] bucket[%u]: old_head=%u -> new_head=%ld\n", hashLoc, old_head, m_rows);
+//     } else {
+//         uint32 old_head = (uint32)m_segBucket->getNthDatum(hashLoc);
+//         m_next->putArray((Datum*)&old_head, NULL, 1);
+//         m_segBucket->setNthDatum(hashLoc, (ScalarValue*)&m_rows);
+//         printf("  [After] segBucket[%u]: old_head=%u -> new_head=%ld\n", hashLoc, old_head, m_rows);
+//     }
+
+//     /* 记录位置 */
+//     m_loc[idx] = m_rows;
+
+//     /* 打印哈希值数组中对应项 */
+//     if (m_hashVal != NULL) {
+//         uint32 stored_hash = ((uint32*)m_hashVal)[m_rows - 1];
+//         printf("  [m_hashVal][%ld] = %u\n", m_rows - 1, stored_hash);
+//     }
+
+//     printf("  ✅ Insert complete for row %ld\n", m_rows);
+//     fflush(stdout);
+
+//     return extra_size_needed;
+// }
+// int64 SonicHashAgg::insertHashTbl(VectorBatch* batch, int idx, uint32 hashval, uint32 hashLoc)
+// {
+//     int i;
+//     int64 extra_size_needed = 0;
+//     ScalarVector* scalar_vec = NULL;
+
+//     m_rows++;
+
+//     /* ==================== 每 1000 行输出一次日志 ==================== */
+//     // if (m_rows % 5000 == 0) {
+//     //     printf(
+//     //         "[SonicHashAgg][Thread %lu][smp_id=%ld] "
+//     //         "Processed %ld rows so far (hashval=%u, hashLoc=%u)\n",
+//     //         gs_thread_self(),
+//     //         u_sess->stream_cxt.smp_id,
+//     //         m_rows,
+//     //         hashval,
+//     //         hashLoc
+//     //     );
+//     // }
+//     // if (m_rows % 5000 == 0) {
+//     elog(LOG,
+//          "[SonicHashAgg][Thread %lu][smp_id=%ld] "
+//          "Processed %ld rows so far (hashval=%u, hashLoc=%u)",
+//          gs_thread_self(),
+//          u_sess->stream_cxt.smp_id,
+//          m_rows,
+//          hashval,
+//          hashLoc);
+//     // }
+//     /* =============================================================== */
+
+//     /* ---------- 1. 输入桶数据 ---------- */
+//     for (i = 0; i < m_hashNeed; i++) {
+//         scalar_vec = &batch->m_arr[m_hashInBatchIdx[i]];
+//         m_data[i]->putArray(&scalar_vec->m_vals[idx], &scalar_vec->m_flag[idx], 1);
+
+//         if (likely(NOT_NULL(scalar_vec->m_flag[idx]))) {
+//             if (m_tupleCount >= 0 && scalar_vec->m_desc.encoded) {
+//                 extra_size_needed += VARSIZE_ANY(scalar_vec->m_vals[idx]);
+//             }
+//         }
+//     }
+//     m_colWidth += extra_size_needed;
+
+//     /* ---------- 2. 初始化聚合值 ---------- */
+//     for (i = 0; i < m_aggNum; i++) {
+//         uint64 init_val = 0;
+//         uint8 init_flag = V_NULL_MASK;
+//         m_data[m_aggIdx[i]]->putArray(&init_val, &init_flag, 1);
+
+//         if (m_runtime->aggInfo[i].vec_final_function.flinfo != NULL) {
+//             m_data[m_aggIdx[i] + 1]->putArray(&init_val, &init_flag, 1);
+//         }
+//     }
+
+//     /* ---------- 3. 存储哈希值 ---------- */
+//     Datum tmp_hashval = UInt32GetDatum(hashval);
+//     m_hash->putArray((ScalarValue*)&tmp_hashval, NULL, 1);
+
+//     /* ---------- 4. 更新哈希表链表头 ---------- */
+//     if (likely(!m_useSegHashTbl)) {
+//         m_next->putArray((Datum*)&(((uint32*)m_bucket)[hashLoc]), NULL, 1);
+//         ((uint32*)m_bucket)[hashLoc] = m_rows;
+//     } else {
+//         uint32 bucket_pos = (uint32)m_segBucket->getNthDatum(hashLoc);
+//         m_next->putArray((Datum*)&(bucket_pos), NULL, 1);
+//         m_segBucket->setNthDatum(hashLoc, (ScalarValue*)&m_rows);
+//     }
+
+//     /* ---------- 5. 记录当前行位置 ---------- */
+//     m_loc[idx] = m_rows;
+
+//     return extra_size_needed;
+// }
+
+class HashTableSizeStats {
+public:
+    struct SizeStats {
+        size_t total_hash_table_size = 0;    // 整个哈希表估算的总字节数
+        size_t key_data_size = 0;           // 键（group key）占用的字节数
+        size_t agg_data_size = 0;           // 聚合列占用的字节数
+        size_t hash_metadata_size = 0;      // 哈希相关元数据（hash值、next 指针、位置映射）字节数
+        size_t bucket_array_size = 0;       // 桶数组（bucket array）占用字节数（固定，只计算一次）
+        size_t estimated_cache_lines = 0;   // 按 64B cache line 估算的 cache line 数量
+        uint64_t total_inserts = 0;         // 累计插入的行数
+        struct timespec last_report_time;   // 上次报告时间戳，用于计算时间差或速率
+        uint64_t total_aggregations = 0;  // 当前线程累计聚合次数
+    };
+    
+    static __thread SizeStats tls_size_stats; // 线程局部的统计结构，每个线程/SM P 有自己的统计
+
+    // 每次插入时调用，用参数更新线程局部的统计
+    static void recordInsertSize(int hash_need, int agg_num, int64 extra_size, 
+                                size_t bucket_size, bool use_seg_hash_tbl, int smp_id,int agg_calls = 0) {
+        // 如果是第一次插入，记录起始时间
+        if (tls_size_stats.total_inserts == 0) {
+            clock_gettime(CLOCK_MONOTONIC, &tls_size_stats.last_report_time);
+        }
+        
+        // 估算本次插入对行大小的增加（以字节为单位）
+        size_t row_size = 0;
+        
+        /* ---------- 1. 键数据大小 ---------- */
+        // 假设每个键使用 ScalarValue（通常 8 字节） + flag（1 字节）//typedef uintptr_t ScalarValue;
+        tls_size_stats.key_data_size += hash_need * (sizeof(ScalarValue) + sizeof(uint8));
+        row_size += hash_need * (sizeof(ScalarValue) + sizeof(uint8));
+        
+        // 如果有变长数据（extra_size），也加到键数据大小
+        tls_size_stats.key_data_size += extra_size;
+        row_size += extra_size;
+        
+        /* ---------- 2. 聚合数据大小 ---------- */
+        // 假设每个聚合列占用一个 uint64（8B）和一个 flag（1B）作为 slot
+        size_t agg_size_per_col = sizeof(uint64) + sizeof(uint8);
+        // 把每个聚合列的空间加到 agg_data_size（中间状态）
+        tls_size_stats.agg_data_size += agg_num * agg_size_per_col;
+        row_size += agg_num * agg_size_per_col;
+        
+        // 如果需要 final 状态（例如某些聚合需要额外 slot），再加一次保守估计
+        tls_size_stats.agg_data_size += agg_num * agg_size_per_col;
+        row_size += agg_num * agg_size_per_col;
+        
+        /* ---------- 3. 哈希元数据大小 ---------- */
+        // 存储哈希值（uint32）
+        tls_size_stats.hash_metadata_size += sizeof(uint32);
+        row_size += sizeof(uint32);
+        
+        // 存储链表的 next 指针（uint32，用于链表冲突处理）
+        tls_size_stats.hash_metadata_size += sizeof(uint32);
+        row_size += sizeof(uint32);
+        
+        // 存储位置映射（m_loc 中的行号，uint32）
+        tls_size_stats.hash_metadata_size += sizeof(uint32);
+        row_size += sizeof(uint32);
+        
+        /* ---------- 4. 哈希桶数组大小 ---------- */
+        // 桶数组通常是固定大小，所以只在第一次插入时统计一次
+        if (tls_size_stats.bucket_array_size == 0) {
+            if (!use_seg_hash_tbl) {
+                // 普通哈希：bucket_size（桶数量） * sizeof(uint32)（每个桶一个 32 位索引）
+                tls_size_stats.bucket_array_size = bucket_size * sizeof(uint32);
+            } else {
+                // 分段哈希表（segmented hash table）也按保守估计计算
+                tls_size_stats.bucket_array_size = bucket_size * sizeof(uint32); // 保守估计
+            }
+        }
+        
+        // 更新总大小（各部分相加）
+        tls_size_stats.total_hash_table_size = 
+            tls_size_stats.key_data_size + 
+            tls_size_stats.agg_data_size + 
+            tls_size_stats.hash_metadata_size + 
+            tls_size_stats.bucket_array_size;
+        
+        // 按 64 字节 cache line 估算 cache 行数
+        tls_size_stats.estimated_cache_lines = 
+            (tls_size_stats.total_hash_table_size + 63) / 64;
+        
+        // 增加插入计数
+        tls_size_stats.total_inserts++;
+
+        tls_size_stats.total_aggregations += agg_calls;
+        
+        // 每隔 1000 插入打印一次统计报告
+        if (tls_size_stats.total_inserts % 1000 == 0) {
+            reportSizeStats(smp_id, row_size);
+        }
+    }
+    
+    // 打印并报告当前统计（调用 elog 打印日志）
+    static void reportSizeStats(int smp_id, size_t avg_row_size) {
+        struct timespec current_time;
+        clock_gettime(CLOCK_MONOTONIC, &current_time);
+        
+        // 计算距离上次报告经过的秒数（尽管当前未直接使用 elapsed_sec）
+        double elapsed_sec = (current_time.tv_sec - tls_size_stats.last_report_time.tv_sec) +
+                           (current_time.tv_nsec - tls_size_stats.last_report_time.tv_nsec) / 1e9;
+        
+        // 使用 elog 打印格式化后的统计信息（以 MB 为单位输出大小）
+        elog(LOG, 
+            "[HashTableSize][SMP%d] "
+            "TotalSize: %.2fMB, "
+            "Keys: %.2fMB, Aggs: %.2fMB, Meta: %.2fMB, Buckets: %.2fMB, "
+            "CacheLines: %zu, AvgRow: %.1fB, Inserts: %lu, AggCalls: %lu",
+            smp_id,
+            (double)tls_size_stats.total_hash_table_size / (1024 * 1024),
+            (double)tls_size_stats.key_data_size / (1024 * 1024),
+            (double)tls_size_stats.agg_data_size / (1024 * 1024),
+            (double)tls_size_stats.hash_metadata_size / (1024 * 1024),
+            (double)tls_size_stats.bucket_array_size / (1024 * 1024),
+            tls_size_stats.estimated_cache_lines,
+            (double)avg_row_size,
+            tls_size_stats.total_inserts,
+            tls_size_stats.total_aggregations   // ✅ 新增输出
+        );
+        
+        // 更新上次报告时间戳为当前时间
+        tls_size_stats.last_report_time = current_time;
+    }
+    
+    // 返回当前线程局部统计的副本，供外部（CacheHitPredictor）分析使用
+    static SizeStats getCurrentStats(int smp_id) {
+        return tls_size_stats;
+    }
+};
+
+// 定义静态成员
+thread_local HashTableSizeStats::SizeStats HashTableSizeStats::tls_size_stats;
+class CacheHitPredictor {
+public:
+    // 基于 SizeStats 提供缓存层级的简单命中率预测
+    static void analyzeCacheBehavior(const HashTableSizeStats::SizeStats& stats, int smp_id) {
+        // 使用常见的缓存容量估算（简化模型）
+        /* ---------- L1 Cache 分析 (通常 32-64KB) ---------- */
+        size_t l1_cache_size = 32 * 1024; // 32KB
+        bool fits_in_l1 = stats.total_hash_table_size <= l1_cache_size;
+        
+        /* ---------- L2 Cache 分析 (通常 256-512KB per core) ---------- */
+        size_t l2_cache_size = 256 * 1024; // 256KB
+        bool fits_in_l2 = stats.total_hash_table_size <= l2_cache_size;
+        
+        /* ---------- L3 Cache 分析 (通常 2-4MB per core) ---------- */
+        size_t l3_cache_size = 2 * 1024 * 1024; // 2MB
+        bool fits_in_l3 = stats.total_hash_table_size <= l3_cache_size;
+        
+        /* ---------- 缓存命中率预测 ---------- */
+        double predicted_hit_rate = 0.0;
+        const char* cache_level = "";
+        
+        // 根据整表是否能放入某一级缓存，设定一个经验命中率基线
+        if (fits_in_l1) {
+            predicted_hit_rate = 0.95; // 95% 命中率
+            cache_level = "L1";
+        } else if (fits_in_l2) {
+            predicted_hit_rate = 0.85; // 85% 命中率
+            cache_level = "L2";
+        } else if (fits_in_l3) {
+            predicted_hit_rate = 0.70; // 70% 命中率
+            cache_level = "L3";
+        } else {
+            predicted_hit_rate = 0.30; // 30% 命中率，主要回落到主内存访问
+            cache_level = "MainMemory";
+        }
+        
+        // 考虑 bucket 数组（桶）的缓存友好性对命中率的缩放
+        double bucket_cache_efficiency = calculateBucketCacheEfficiency(stats.bucket_array_size);
+        predicted_hit_rate *= bucket_cache_efficiency; // 最终命中率 = 基线 * 桶效率
+        
+        // 打印预测结果到日志
+        elog(LOG,
+            "[CachePredict][SMP%d] "
+            "TableSize: %.2fMB -> Fits in %s, "
+            "PredictedHitRate: %.1f%%, BucketEfficiency: %.1f%%, "
+            "TotalCacheLines: %zu",
+            smp_id,
+            (double)stats.total_hash_table_size / (1024 * 1024),
+            cache_level,
+            predicted_hit_rate * 100,
+            bucket_cache_efficiency * 100,
+            stats.estimated_cache_lines);
+    }
+    
+private:
+    // 根据桶数组总体大小给出一个经验性的缓存效率因子
+    static double calculateBucketCacheEfficiency(size_t bucket_size) {
+        // 小的桶数组更容易被缓存，返回较高效率因子
+        if (bucket_size <= 16 * 1024) { // <= 16KB
+            return 1.0; // 完全缓存友好
+        } else if (bucket_size <= 64 * 1024) { // <= 64KB
+            return 0.9; // 大部分缓存友好
+        } else if (bucket_size <= 256 * 1024) { // <= 256KB
+            return 0.7; // 部分缓存友好
+        } else {
+            return 0.4; // 较大时缓存不友好
+        }
+    }
+};
+
+
 int64 SonicHashAgg::insertHashTbl(VectorBatch* batch, int idx, uint32 hashval, uint32 hashLoc)
 {
-    int i;
-    int64 extra_size_needed = 0;
-    ScalarVector* scalar_vec = NULL;
+    int i;                                 // 循环变量
+    int64 extra_size_needed = 0;           // 本次插入额外的变长字节数
+    ScalarVector* scalar_vec = NULL;       // 临时指向输入列的向量
 
-    m_rows++;
+    m_rows++;                              // 全局/本实例的行计数器自增，作为新行的 id
 
-    /* input hash key value */
+    /* ---------- 1. 输入桶数据 ---------- */
     for (i = 0; i < m_hashNeed; i++) {
+        // 在批次中找到第 i 个 key 所在的列（通过映射 m_hashInBatchIdx）
         scalar_vec = &batch->m_arr[m_hashInBatchIdx[i]];
+        // 把该列当前行的数据和值的 flag 写入内部 m_data 的对应列
         m_data[i]->putArray(&scalar_vec->m_vals[idx], &scalar_vec->m_flag[idx], 1);
 
+        // 如果该值非 NULL
         if (likely(NOT_NULL(scalar_vec->m_flag[idx]))) {
+            // 若启用了 tupleCount 检查并且该列是编码（变长）类型，则计算变长字节并累加
             if (m_tupleCount >= 0 && scalar_vec->m_desc.encoded) {
                 extra_size_needed += VARSIZE_ANY(scalar_vec->m_vals[idx]);
             }
         }
     }
+    // 把本次插入的变长额外宽度累加到 m_colWidth（用于列宽统计或内存管理）
     m_colWidth += extra_size_needed;
 
-    /* set the init agg value */
+    /* ---------- 2. 初始化聚合值 ---------- */
     for (i = 0; i < m_aggNum; i++) {
-        uint64 init_val = 0;
-        uint8 init_flag = V_NULL_MASK;
+        uint64 init_val = 0;                // 聚合初始值（示例使用 0）
+        uint8 init_flag = V_NULL_MASK;      // 初始 flag（这里使用 V_NULL_MASK，表示初始/无效状态）
+        // 把初始值写到聚合列对应位置
         m_data[m_aggIdx[i]]->putArray(&init_val, &init_flag, 1);
 
+        // 如果该聚合有 final 函数（需要额外的 slot 来保存中间/最终状态），写入额外 slot
         if (m_runtime->aggInfo[i].vec_final_function.flinfo != NULL) {
             m_data[m_aggIdx[i] + 1]->putArray(&init_val, &init_flag, 1);
         }
     }
 
-    /* restore hashval */
-    Datum tmp_hashval = UInt32GetDatum(hashval);
-    m_hash->putArray((ScalarValue*)&tmp_hashval, NULL, 1);
+    /* ---------- 3. 存储哈希值 ---------- */
+    Datum tmp_hashval = UInt32GetDatum(hashval); // 将 uint32 hash 转为 Datum 表示
+    m_hash->putArray((ScalarValue*)&tmp_hashval, NULL, 1); // 写入哈希列（无 flag）
 
-    /* update hash table */
+    /* ---------- 4. 更新哈希表链表头 ---------- */
     if (likely(!m_useSegHashTbl)) {
+        // 普通哈希表实现：把旧的桶头写为新节点的 next，然后把桶头更新为当前行（m_rows）
         m_next->putArray((Datum*)&(((uint32*)m_bucket)[hashLoc]), NULL, 1);
-        ((uint32*)m_bucket)[hashLoc] = m_rows;
+        ((uint32*)m_bucket)[hashLoc] = m_rows; // 将桶头指向新行
     } else {
+        // 分段哈希表实现：从分段 bucket 读取旧头，作为 next，然后设置新头
         uint32 bucket_pos = (uint32)m_segBucket->getNthDatum(hashLoc);
         m_next->putArray((Datum*)&(bucket_pos), NULL, 1);
         m_segBucket->setNthDatum(hashLoc, (ScalarValue*)&m_rows);
     }
 
-    m_loc[idx] = m_rows;
+    /* ---------- 5. 记录当前行位置 ---------- */
+    m_loc[idx] = m_rows; // 记录该批内行 idx 在哈希表中的行号（用于回写或定位）
 
-    return extra_size_needed;
+    /* ---------- 6. 统计哈希表大小和缓存分析 ---------- */
+    // HashTableSizeStats::recordInsertSize(
+    //     m_hashNeed, 
+    //     m_aggNum, 
+    //     extra_size_needed,
+    //     m_hashSize,  // bucket 数量
+    //     m_useSegHashTbl,
+    //     u_sess->stream_cxt.smp_id,
+    //     m_aggNum // ✅ 每插入一行，对应 m_aggNum 次聚合初始化
+    // );
+    
+    // // 每 5000 行调用一次缓存行为分析（相比每 1000 的 size 报告，这里周期更长）
+    // if (m_rows % 10000 == 0) {
+    //     auto current_stats = HashTableSizeStats::getCurrentStats(u_sess->stream_cxt.smp_id);
+    //     CacheHitPredictor::analyzeCacheBehavior(current_stats, u_sess->stream_cxt.smp_id);
+    // }
+
+    return extra_size_needed; // 返回此次插入导致的变长额外大小
 }
 
 /*
@@ -1813,15 +2463,22 @@ int64 SonicHashAgg::calcHashTableSize(int64 oldSize)
             m_enableExpansion = true;
         }
     }
-
-    if (logit) {
-        MEMCTL_LOG(DEBUG2,
-            "[VecSonicHashAgg(%d)]: Hash table old size is %ld, new size is %ld, m_rows :%ld.",
-            m_runtime->ss.ps.plan->plan_node_id,
-            oldSize,
-            hash_size,
-            m_rows);
-    }
+    // if (logit) {
+        // elog(LOG,
+        //     "[VecSonicHashAgg(%d)]: Hash table old size is %ld, new size is %ld, m_rows :%ld.",
+        //     m_runtime->ss.ps.plan->plan_node_id,
+        //     oldSize,
+        //     hash_size,
+        //     m_rows);
+    // }
+    // if (logit) {
+    //     MEMCTL_LOG(DEBUG2,
+    //         "[VecSonicHashAgg(%d)]: Hash table old size is %ld, new size is %ld, m_rows :%ld.",
+    //         m_runtime->ss.ps.plan->plan_node_id,
+    //         oldSize,
+    //         hash_size,
+    //         m_rows);
+    // }
 
     return hash_size;
 }
@@ -1863,7 +2520,6 @@ void SonicHashAgg::AllocHashTbl(VectorBatch* batch, int idx, uint32 hashval, int
     if (m_tupleCount >= 0) {
         m_tupleCount++;
     }
-
     switch (m_strategy) {
         case HASH_IN_MEMORY: {
             AutoContextSwitch memSwitch(m_memControl.hashContext);
@@ -1874,7 +2530,6 @@ void SonicHashAgg::AllocHashTbl(VectorBatch* batch, int idx, uint32 hashval, int
             }
 
             int64 size_needed = insertHashTbl(batch, idx, hashval, hashLoc);
-
             /* judge memory status after inserting */
             judgeMemoryOverflow("VecSonicHashAgg",
                 m_runtime->ss.ps.plan->plan_node_id,
@@ -1944,6 +2599,18 @@ void SonicHashAgg::AllocHashTbl(VectorBatch* batch, int idx, uint32 hashval, int
             }
             m_partFileSource[part_idx]->m_rows += 1;
             (void)pgstat_report_waitstatus(oldState);
+
+            // /* ✅ 统计插入行信息（用于统一线程统计） */
+            // HashTableSizeStats::recordInsertSize(
+            //     m_hashNeed,
+            //     m_aggNum,
+            //     0,                      // 溢写不占额外内存
+            //     m_hashSize,             // 桶数可复用
+            //     m_useSegHashTbl,
+            //     u_sess->stream_cxt.smp_id,
+            //     m_aggNum                // 聚合列次数统计
+            // );
+
         } break;
 
         case HASH_RESPILL: {
@@ -2016,6 +2683,18 @@ void SonicHashAgg::AllocHashTbl(VectorBatch* batch, int idx, uint32 hashval, int
             }
             m_overflowFileSource[part_idx]->m_rows += 1;
             (void)pgstat_report_waitstatus(oldStatus);
+
+            // /* ✅ 同样进行一次统计更新 */
+            // HashTableSizeStats::recordInsertSize(
+            //     m_hashNeed,
+            //     m_aggNum,
+            //     0,
+            //     m_hashSize,
+            //     m_useSegHashTbl,
+            //     u_sess->stream_cxt.smp_id,
+            //     m_aggNum
+            // );
+
         } break;
         default:
             ereport(ERROR,
@@ -2041,6 +2720,14 @@ void SonicHashAgg::tryExpandHashTable()
         if ((m_memControl.maxMem > 0) || judgeMemoryAllowExpand()) {
             m_hashSize = calcHashTableSize<true, true>(m_hashSize);
             expandHashTable();
+            // m_hashSize = calcHashTableSize<true, true>(m_hashSize);
+
+        // elog(LOG,
+        //     "[VecSonicHashAgg(%d) smp(%d)]: Hash table old size is %ld, new size is %ld, m_rows :%ld.",
+        //     m_runtime->ss.ps.plan->plan_node_id,
+        //     u_sess->stream_cxt.smp_id,
+        //     m_hashSize,
+        //     m_rows);
         } else {
             m_enableExpansion = false;
         }
@@ -2266,40 +2953,40 @@ void SonicHashAgg::AggregationOnScalar(VecAggInfo* aggInfo, ScalarVector* pVecto
  * @Description	: Project and compute aggregation.
  * @in batch		: current batch need to dealed with
  */
-void SonicHashAgg::BatchAggregation(VectorBatch* batch)
-{
-    int i;
-    int nrows;
+// void SonicHashAgg::BatchAggregation(VectorBatch* batch)
+// {
+//     int i;
+//     int nrows;
 
-    nrows = batch->m_rows;
+//     nrows = batch->m_rows;
 
-    for (i = 0; i < m_aggNum; i++) {
-        VectorBatch* pBatch = NULL;
-        ScalarVector* pVector = NULL;
-        VecAggStatePerAgg peraggstate = &m_runtime->pervecagg[m_aggNum - 1 - i];
-        ExprContext* econtext = NULL;
+//     for (i = 0; i < m_aggNum; i++) {
+//         VectorBatch* pBatch = NULL;
+//         ScalarVector* pVector = NULL;
+//         VecAggStatePerAgg peraggstate = &m_runtime->pervecagg[m_aggNum - 1 - i];
+//         ExprContext* econtext = NULL;
 
-        /* for count(*), peraggstate->evalproj is null. */
-        if (peraggstate->evalproj != NULL) {
-            econtext = peraggstate->evalproj->pi_exprContext;
-            econtext->ecxt_outerbatch = batch;
-            pBatch = ExecVecProject(peraggstate->evalproj);
-            Assert(!peraggstate->evalproj || (pBatch->m_cols == 1));
-            pVector = &pBatch->m_arr[0];
-        } else {
-            pVector = &batch->m_arr[0];
-        }
+//         /* for count(*), peraggstate->evalproj is null. */
+//         if (peraggstate->evalproj != NULL) {
+//             econtext = peraggstate->evalproj->pi_exprContext;
+//             econtext->ecxt_outerbatch = batch;
+//             pBatch = ExecVecProject(peraggstate->evalproj);
+//             Assert(!peraggstate->evalproj || (pBatch->m_cols == 1));
+//             pVector = &pBatch->m_arr[0];
+//         } else {
+//             pVector = &batch->m_arr[0];
+//         }
 
-        pVector->m_rows = Min(pVector->m_rows, nrows);
+//         pVector->m_rows = Min(pVector->m_rows, nrows);
 
-        /* do aggregation on one column */
-        AggregationOnScalar(&m_runtime->aggInfo[i], pVector, m_aggIdx[i]);
+//         /* do aggregation on one column */
+//         AggregationOnScalar(&m_runtime->aggInfo[i], pVector, m_aggIdx[i]);
 
-        if (econtext != NULL) {
-            ResetExprContext(econtext);
-        }
-    }
-}
+//         if (econtext != NULL) {
+//             ResetExprContext(econtext);
+//         }
+//     }
+// }
 
 /*
  * @Description	: set value to scanBatch include field value and agg value.
@@ -2412,3 +3099,393 @@ VectorBatch* SonicHashAgg::ProducerBatch()
 
     return res;
 }
+
+// void SonicHashAgg::analyze_aggregation_access(VecAggInfo* aggInfo, ScalarVector* vec, int aggIdx, int nrows)
+// {
+//     // 确保 group_access_counters 大小足够
+//     if (group_access_counters.size() < static_cast<size_t>(nrows)) {
+//         group_access_counters.resize(nrows, 0);
+//     }
+
+//     std::map<uint32_t, size_t> agg_state_access;  // 聚合状态访问次数统计
+//     size_t total_accesses = 0;
+//     size_t max_accesses = 0;
+//     uint32_t hottest_agg_state = 0;
+
+//     for (int row = 0; row < nrows; row++) {
+//         uint32_t agg_loc = m_loc[row];  // 假设 m_loc[row] 是该行对应的聚合状态位置
+//         agg_state_access[agg_loc]++;
+//         group_access_counters[agg_loc]++;  // 更新全局统计
+//         total_accesses++;
+
+//         if (agg_state_access[agg_loc] > max_accesses) {
+//             max_accesses = agg_state_access[agg_loc];
+//             hottest_agg_state = agg_loc;
+//         }
+//     }
+
+//     double access_imbalance = (double)max_accesses / (total_accesses / (double)agg_state_access.size());
+
+//     // 输出访问分析信息
+//     printf("Aggregation Index %d Access Analysis:\n", aggIdx);
+//     printf("   - Total Agg States Accessed: %zu\n", agg_state_access.size());
+//     printf("   - Hottest State ID: %u, Accesses: %zu\n", hottest_agg_state, max_accesses);
+//     printf("   - Access Imbalance Ratio: %.2fx\n", access_imbalance);
+
+//     if (access_imbalance > 10.0) {
+//         printf("   ⚠️ HIGH ACCESS IMBALANCE - Memory contention likely\n");
+//     }
+// }
+
+
+// void SonicHashAgg::record_probe_performance(int thread_id, uint64_t duration_ns, int nrows)
+// {
+//     std::lock_guard<std::mutex> lock(probe_perf_mutex);  // 保证线程安全
+
+//     // 扩容向量以支持更多线程
+//     if (thread_id >= static_cast<int>(thread_agg_times.size())) {
+//         thread_agg_times.resize(thread_id + 1, 0.0);
+//         thread_processed_rows.resize(thread_id + 1, 0);
+//     }
+
+//     thread_agg_times[thread_id] += static_cast<double>(duration_ns);  // 累计耗时
+//     thread_processed_rows[thread_id] += nrows;                        // 累计处理行数
+
+//     // 可选：每次记录时打印
+//     printf("Thread %d: +%d rows, duration %.3f ms, total rows %zu, total time %.3f ms\n",
+//            thread_id,
+//            nrows,
+//            duration_ns / 1e6,
+//            thread_processed_rows[thread_id],
+//            thread_agg_times[thread_id] / 1e6);
+// }
+
+void SonicHashAgg::BatchAggregation(VectorBatch* batch)
+{
+    int i;
+    int nrows;
+    instr_time start_time;
+    double project_time, agg_time;
+    nrows = batch->m_rows;
+    for (i = 0; i < m_aggNum; i++) {
+        VectorBatch* pBatch = NULL;
+        ScalarVector* pVector = NULL;
+        VecAggStatePerAgg peraggstate = &m_runtime->pervecagg[m_aggNum - 1 - i];
+        ExprContext* econtext = NULL;
+
+        /* for count(*), peraggstate->evalproj is null. */
+        if (peraggstate->evalproj != NULL) {
+            econtext = peraggstate->evalproj->pi_exprContext;
+            econtext->ecxt_outerbatch = batch;
+            // INSTR_TIME_SET_CURRENT(start_time);
+            pBatch = ExecVecProject(peraggstate->evalproj);
+            // INSTR_TIME_SET_CURRENT(end_time);
+            // project_time = elapsed_time(&start_time); // 转换为毫秒
+            Assert(!peraggstate->evalproj || (pBatch->m_cols == 1));
+            pVector = &pBatch->m_arr[0];
+            // elog(LOG, "ExecVecProject time: %d ms", project_time);
+        } else {
+            pVector = &batch->m_arr[0];
+        }
+
+        pVector->m_rows = Min(pVector->m_rows, nrows);
+        // INSTR_TIME_SET_CURRENT(start_time);
+        /* do aggregation on one column */
+        AggregationOnScalar(&m_runtime->aggInfo[i], pVector, m_aggIdx[i]);
+        // agg_time = elapsed_time(&start_time); // 转换为毫秒
+        
+        // elog(LOG, "AggregationOnScalar time: %d ms", agg_time);
+
+        if (econtext != NULL) {
+            ResetExprContext(econtext);
+        }
+    }
+}
+
+// void SonicHashAgg::analyze_probe_scalability(int num_threads) 
+// {
+    // printf("=== Batch Aggregation (Probe) Scalability Analysis ===\n");
+    
+    // // 分析1: 聚合状态访问模式
+    // analyze_aggregation_access_pattern(m_proBatch);
+    
+    // // 分析2: 计算与内存访问比例
+    // analyze_compute_memory_ratio();
+    
+    // // 分析3: 线程间工作负载平衡
+    // analyze_workload_balance(num_threads);
+    
+    // 分析4: 函数调用开销
+    //analyze_function_call_overhead();
+// }
+
+// void SonicHashAgg::analyze_aggregation_access_pattern(VectorBatch* batch)
+// {
+//     // printf("1. Aggregation State Access Pattern:\n");
+    
+//     // // 统计每个聚合状态的访问频率
+//     // std::map<uint32_t, size_t> agg_state_access;
+//     // size_t total_accesses = 0;
+//     // size_t max_accesses = 0;
+//     // uint32_t hottest_agg_state = 0;
+    
+//     // // 模拟或实际统计聚合状态的访问
+//     // for (int i = 0; i < m_aggNum; i++) {
+//     //     for (int row = 0; row < batch->m_rows; row++) {
+//     //         uint32_t agg_loc = m_loc[row];  // 聚合状态位置
+//     //         agg_state_access[agg_loc]++;
+//     //         total_accesses++;
+            
+//     //         if (agg_state_access[agg_loc] > max_accesses) {
+//     //             max_accesses = agg_state_access[agg_loc];
+//     //             hottest_agg_state = agg_loc;
+//     //         }
+//     //     }
+//     // }
+    
+//     // double access_imbalance = (double)max_accesses / (total_accesses / agg_state_access.size());
+//     // printf("   - Total Agg States: %zu\n", agg_state_access.size());
+//     // printf("   - Access Imbalance Ratio: %.2fx\n", access_imbalance);
+//     // printf("   - Hottest State Accesses: %zu\n", max_accesses);
+    
+//     // if (access_imbalance > 10.0) {
+//     //     printf("   ⚠️ HIGH ACCESS IMBALANCE - Memory contention likely\n");
+//     // }
+// }
+
+// 假设 AggInfo 定义了聚合类型和相关信息
+// 这里是一个简单示例
+// double SonicHashAgg::estimate_agg_complexity(VecAggInfo* aggInfo)
+// {
+//     if (!aggInfo) return 0.0;
+
+//     switch (aggInfo->aggType) {
+//         case AGG_SUM:
+//             return 1.0; // SUM: 1 次加法
+//         case AGG_COUNT:
+//             return 1.0; // COUNT: 1 次计数
+//         case AGG_AVG:
+//             return 2.0; // AVG: 1 次加法 + 1 次维护计数
+//         case AGG_MIN:
+//         case AGG_MAX:
+//             return 1.0; // MIN/MAX: 1 次比较
+//         case AGG_COMPLEX_EXPR:
+//             return 5.0; // 假设复杂表达式约等于 5 次操作
+//         default:
+//             return 1.0; // 默认 1 次操作
+//     }
+// }
+
+
+// void SonicHashAgg::analyze_compute_memory_ratio()
+// {
+//     printf("2. Compute vs Memory Bound Analysis:\n");
+    
+//     // 估算计算强度 (每字节内存访问的计算操作数)
+//     // 对于TPC-H Q1的聚合函数：
+//     double compute_operations_per_row = 0;
+    
+//     for (int i = 0; i < m_aggNum; i++) {
+//         // 每个聚合函数的计算复杂度
+//         // SUM: 1次加法
+//         // AVG: 1次加法 + 维护计数  
+//         // 复杂表达式: 更多计算
+//         compute_operations_per_row += estimate_agg_complexity(&m_runtime->aggInfo[i]);
+//     }
+    
+//     // 内存访问: 读取输入数据 + 更新聚合状态
+//     double memory_accesses_per_row = m_aggNum * 2;  // 简化估算
+    
+//     double compute_intensity = compute_operations_per_row / memory_accesses_per_row;
+    
+//     printf("   - Compute Ops/Row: %.1f\n", compute_operations_per_row);
+//     printf("   - Memory Accesses/Row: %.1f\n", memory_accesses_per_row);
+//     printf("   - Compute Intensity: %.2f\n", compute_intensity);
+    
+//     if (compute_intensity < 1.0) {
+//         printf("   🔴 MEMORY BOUND - Limited by memory bandwidth\n");
+//     } else if (compute_intensity < 4.0) {
+//         printf("   🟡 BALANCED - Both compute and memory matter\n");
+//     } else {
+//         printf("   ✅ COMPUTE BOUND - Can benefit from more threads\n");
+//     }
+// }
+
+
+// void* thread_func_wrapper(void* arg) {
+//     ThreadArg* t_arg = (ThreadArg*)arg;
+//     struct timespec start, end;
+//     clock_gettime(CLOCK_MONOTONIC, &start);
+
+//     // 调用实际线程函数
+//     t_arg->func(t_arg->thread_id);
+
+//     clock_gettime(CLOCK_MONOTONIC, &end);
+//     t_arg->exec_time_ns = (end.tv_sec - start.tv_sec) * 1e9 + (end.tv_nsec - start.tv_nsec);
+//     return nullptr;
+// }
+
+// // 返回每个线程的执行时间
+// std::vector<double> SonicHashAgg::get_thread_execution_times(int num_threads)
+// {
+//     std::vector<ThreadArg> args(num_threads);
+//     std::vector<pthread_t> threads(num_threads);
+
+//     // 定义每个线程实际要做的工作函数，这里示例使用空函数或你实际聚合计算
+//     auto worker = [](int tid) {
+//         // TODO: 替换为实际工作负载
+//         for (volatile int i = 0; i < 1000000; ++i); 
+//     };
+
+//     for (int i = 0; i < num_threads; ++i) {
+//         args[i].thread_id = i;
+//         args[i].exec_time_ns = 0;
+//         args[i].func = worker;
+//         pthread_create(&threads[i], nullptr, thread_func_wrapper, &args[i]);
+//     }
+
+//     for (int i = 0; i < num_threads; ++i) {
+//         pthread_join(threads[i], nullptr);
+//     }
+
+//     std::vector<double> times(num_threads);
+//     for (int i = 0; i < num_threads; ++i) {
+//         times[i] = args[i].exec_time_ns;
+//     }
+
+//     return times;
+// }
+
+// void SonicHashAgg::analyze_workload_balance(int num_threads)
+// {
+//     printf("3. Workload Balance Analysis:\n");
+    
+//     // 获取各线程的执行时间
+//     auto thread_times = get_thread_execution_times(num_threads);
+//     if (thread_times.size() < 2) {
+//         printf("   - Single thread mode\n");
+//         return;
+//     }
+    
+//     double avg_time = std::accumulate(thread_times.begin(), thread_times.end(), 0.0) / thread_times.size();
+//     double max_time = *std::max_element(thread_times.begin(), thread_times.end());
+//     double min_time = *std::min_element(thread_times.begin(), thread_times.end());
+    
+//     double imbalance_ratio = max_time / avg_time;
+//     double efficiency = (avg_time / max_time) * 100;
+    
+//     printf("   - Thread Time Range: %.3fms - %.3fms\n", min_time/1e6, max_time/1e6);
+//     printf("   - Load Imbalance: %.2fx\n", imbalance_ratio);
+//     printf("   - Parallel Efficiency: %.1f%%\n", efficiency);
+    
+//     if (efficiency < 80) {
+//         printf("   ⚠️ POOR LOAD BALANCE - Some threads are idle\n");
+//     }
+// }
+
+// void SonicHashAgg::analyze_q1_specific_bottlenecks()
+// {
+//     printf("4. TPC-H Q1 Specific Analysis:\n");
+    
+//     // Q1特有的聚合函数模式
+//     printf("   - Aggregation Functions: 8 complex aggregates\n");
+//     printf("   - Data Types: Mostly double-precision FP\n");
+//     printf("   - Expression Complexity: High (multiplications)\n");
+    
+//     // 分析向量化效果
+//     analyze_vectorization_efficiency();
+    
+//     // 分析浮点运算吞吐量
+//     analyze_fp_throughput();
+// }
+
+// void SonicHashAgg::analyze_vectorization_efficiency()
+// {
+//     printf("5. Vectorization Efficiency:\n");
+    
+//     // 估算向量化利用率
+//     int vector_width = 4;  // 假设SSE/AVX宽度
+//     double vectorization_efficiency = 0.0;
+    
+//     // 基于数据类型的向量化潜力
+//     for (int i = 0; i < m_aggNum; i++) {
+//         // 检查每个聚合函数是否适合向量化
+//         bool can_vectorize = check_agg_vectorizable(&m_runtime->aggInfo[i]);
+//         if (can_vectorize) {
+//             vectorization_efficiency += 1.0 / m_aggNum;
+//         }
+//     }
+    
+//     printf("   - Vectorization Potential: %.1f%%\n", vectorization_efficiency * 100);
+    
+//     if (vectorization_efficiency < 0.5) {
+//         printf("   ⚠️ LIMITED VECTORIZATION - Scalar operations dominate\n");
+//     }
+// }
+
+// void SonicHashAgg::analyze_cache_efficiency(size_t total_groups, int agg_num) 
+// {
+//     printf("=== Cache Efficiency Analysis ===\n");
+    
+//     // 估算每个分组的内存大小
+//     // 对于TPC-H Q1，每个分组存储：
+//     struct AggState {
+//         double sum_qty;          // 8 bytes
+//         double sum_base_price;   // 8 bytes  
+//         double sum_disc_price;   // 8 bytes
+//         double sum_charge;       // 8 bytes
+//         double avg_qty;          // 8 bytes (累计值和计数)
+//         double avg_price;        // 8 bytes
+//         double avg_disc;         // 8 bytes
+//         int64_t count;           // 8 bytes
+//         // 哈希表开销:
+//         uint32_t next_ptr;       // 4 bytes (链表指针)
+//         char key_storage[16];    // 16 bytes (存储分组键)
+//         // 对齐填充: ~12 bytes
+//         // 总计: ~100 bytes
+//     };
+    
+//     const size_t approx_agg_state_size = 100;  // 每个分组约100字节
+    
+//     // 计算工作集大小
+//     size_t working_set_size = total_groups * approx_agg_state_size;
+    
+//     // 典型的缓存大小（根据你的硬件调整）
+//     size_t l1_cache_size = 32 * 1024;      // 32KB L1数据缓存
+//     size_t l2_cache_size = 256 * 1024;     // 256KB L2缓存  
+//     size_t l3_cache_size = 20 * 1024 * 1024; // 20MB L3缓存（服务器）
+    
+//     printf("Total Groups: %zu\n", total_groups);
+//     printf("Working Set Size: %.2f MB\n", (double)working_set_size / (1024*1024));
+//     printf("L1 Cache (32KB) Fit: %s\n", working_set_size <= l1_cache_size ? "✅ YES" : "❌ NO");
+//     printf("L2 Cache (256KB) Fit: %s\n", working_set_size <= l2_cache_size ? "✅ YES" : "❌ NO");
+//     printf("L3 Cache (20MB) Fit: %s\n", working_set_size <= l3_cache_size ? "✅ YES" : "❌ NO");
+    
+//     // 缓存行分析（64字节缓存行）
+//     size_t cache_lines_needed = (working_set_size + 63) / 64;
+//     size_t cache_lines_per_group = (approx_agg_state_size + 63) / 64;
+    
+//     printf("Cache Lines Needed: %zu\n", cache_lines_needed);
+//     printf("Cache Lines per Group: %zu\n", cache_lines_per_group);
+    
+//     // 并行访问时的缓存竞争分析
+//     if (working_set_size <= l1_cache_size) {
+//         printf("Cache Status: ✅ EXCELLENT - Fits in L1 cache\n");
+//     } else if (working_set_size <= l2_cache_size) {
+//         printf("Cache Status: ✅ GOOD - Fits in L2 cache\n"); 
+//     } else if (working_set_size <= l3_cache_size) {
+//         printf("Cache Status: ⚠️ FAIR - Fits in L3 cache\n");
+//     } else {
+//         printf("Cache Status: ❌ POOR - Spills to main memory\n");
+//     }
+    
+//     // 根据分组数给出建议
+//     if (total_groups <= 10) {
+//         printf("Recommendation: Very few groups - watch for memory contention\n");
+//     } else if (total_groups <= 1000) {
+//         printf("Recommendation: Good group count for parallel execution\n");
+//     } else {
+//         printf("Recommendation: Many groups - good for parallelism but watch cache usage\n");
+//     }
+//     printf("\n");
+// }

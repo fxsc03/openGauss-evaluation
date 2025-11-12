@@ -76,6 +76,7 @@
 extern void StreamSaveTxnContext(StreamTxnContext* stc);
 extern void StreamRestoreTxnContext(StreamTxnContext* stc);
 
+
 StreamProducer::StreamProducer(
     StreamKey key, PlannedStmt* pstmt, Stream* snode, MemoryContext context, int socketNum, StreamTransType transType)
     : StreamObj(context, STREAM_PRODUCER)
@@ -166,6 +167,8 @@ StreamProducer::StreamProducer(
     m_plan = makeNode(PlannedStmt);
     rc = memcpy_s(m_plan, sizeof(PlannedStmt), pstmt, sizeof(PlannedStmt));
     securec_check(rc, "\0", "\0");
+
+    m_sendMonitor = new StreamSendMonitor("StreamProducer");
 }
 
 StreamProducer::~StreamProducer()
@@ -191,6 +194,11 @@ StreamProducer::~StreamProducer()
     m_distributeKey = NULL;
     m_distributeIdx = NULL;
     m_skewState = NULL;
+    
+    if (m_sendMonitor) {
+        delete m_sendMonitor;
+        m_sendMonitor = NULL;
+    }
 }
 
 /*

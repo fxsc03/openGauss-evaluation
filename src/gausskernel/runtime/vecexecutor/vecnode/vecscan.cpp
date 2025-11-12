@@ -71,6 +71,15 @@ static inline VectorBatch* exec_vec_scan_fetch(
  *           "cursor" is positioned before the first qualifying tuple.
  * ----------------------------------------------------------------
  */
+static inline double elapsed_time(instr_time* starttime)
+{
+    instr_time endtime;
+    INSTR_TIME_SET_CURRENT(endtime);
+    INSTR_TIME_SUBTRACT(endtime, *starttime);
+    return INSTR_TIME_GET_DOUBLE(endtime);
+}
+
+
 VectorBatch* ExecVecScan(ScanState* node, ExecVecScanAccessMtd accessMtd, /* function returning a tuple */
     ExecVecScanRecheckMtd recheckMtd)
 {
@@ -122,8 +131,33 @@ VectorBatch* ExecVecScan(ScanState* node, ExecVecScanAccessMtd accessMtd, /* fun
         VectorBatch* batch = NULL;
 
         CHECK_FOR_INTERRUPTS();
+        // //我自己加的开始
+        // /* ---- 性能统计开始 ---- */
+        // instr_time start_time;
+        // INSTR_TIME_SET_CURRENT(start_time);
+        // batch = exec_vec_scan_fetch(node, accessMtd, recheckMtd);//原有的
+        // double elapsed_ms = elapsed_time(&start_time);
+        // static long long total_rows = 0;
+        // static long long total_batches = 0;
+        // if (!BatchIsNull(batch)) {
+        //     total_rows   += batch->m_rows;
+        //     total_batches++;
+        //     if (elapsed_ms > 0) {
+        //         double rows_per_ms = (double)batch->m_rows / elapsed_ms;
+        //         ereport(LOG,
+        //                 (errmsg("[VecScan(%d)]: fetched %d rows in %.3f ms "
+        //                         "(%.2f rows/ms), total %lld rows %lld batches",
+        //                         node->ps.plan->plan_node_id,
+        //                         batch->m_rows,
+        //                         elapsed_ms,
+        //                         rows_per_ms,
+        //                         total_rows,
+        //                         total_batches)));
+        //     }
+        // }
+        // //我自己加的结束
+        // /* ---- 性能统计结束 ---- */
 
-        batch = exec_vec_scan_fetch(node, accessMtd, recheckMtd);
         /* Response to the stop query flag. */
         if (BatchIsNull(batch) || unlikely(true == executorEarlyStop())) {
             return NULL;

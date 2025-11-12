@@ -169,7 +169,8 @@ typedef struct StreamSharedContext {
     bool vectorized;
     struct hash_entry** poll_entrys;
     struct hash_entry*** quota_entrys;
-
+    uint64** processed_batches;  // processed_batches[channel][smp_id]
+    uint64** processed_rows;     // processed_rows[channel][smp_id]
     int rows;
 } StreamSharedContext;
 
@@ -241,7 +242,7 @@ public:
 
     /* Stream pair. */
     StreamPair* m_pair;
-
+    Stream* m_streamNode;
 protected:
     /* Stream type. */
     StreamObjType m_type;
@@ -259,7 +260,7 @@ protected:
     int m_connNum;
 
     /* Stream node. */
-    Stream* m_streamNode;
+
 
     /* Identify itself in the group. */
     int m_nodeGroupIdx;

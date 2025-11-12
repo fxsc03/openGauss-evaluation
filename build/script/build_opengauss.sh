@@ -5,7 +5,7 @@
 # It is just a wrapper to package_internal.sh
 # Example: ./build_opengauss.sh -3rd path/third_party_binarylibs/
 # change it to "N", if you want to build with original build system based on solely Makefiles
-declare CMAKE_PKG="N"
+declare CMAKE_PKG="Y"
 declare SCRIPT_DIR=$(cd $(dirname "${BASH_SOURCE[0]}"); pwd)
 declare ROOT_DIR=$(dirname "${SCRIPT_DIR}")
 declare ROOT_DIR=$(dirname "${ROOT_DIR}")
@@ -154,15 +154,15 @@ else
     declare CMAKE_BUILD_DIR=${ROOT_DIR}/tmp_build
     os_version=$(cat /etc/os-release | grep 'VERSION_ID=' | cut -d'=' -f2 | tr -d '"')
     if [ "$product_mode"x == "lite"x ]; then
-        declare CMAKE_OPT="-DENABLE_MULTIPLE_NODES=OFF -DENABLE_PRIVATEGAUSS=OFF -DENABLE_THREAD_SAFETY=ON -DENABLE_READLINE=ON -DENABLE_LITE_MODE=ON ${extra_cmake_opt}"
+        declare CMAKE_OPT="-DENABLE_MULTIPLE_NODES=OFF -DENABLE_PRIVATEGAUSS=OFF -DENABLE_THREAD_SAFETY=ON -DENABLE_READLINE=OFF -DENABLE_MOT=OFF -DENABLE_LITE_MODE=ON ${extra_cmake_opt}"
     elif [ "$product_mode"x == "finance"x ]; then
         export ENABLE_FINANCE_MODE=ON
-        declare CMAKE_OPT="-DENABLE_MULTIPLE_NODES=OFF -DENABLE_PRIVATEGAUSS=OFF -DENABLE_THREAD_SAFETY=ON -DENABLE_READLINE=ON -DENABLE_FINANCE_MODE=ON ${extra_cmake_opt}"
+        declare CMAKE_OPT="-DENABLE_MULTIPLE_NODES=OFF -DENABLE_PRIVATEGAUSS=OFF -DENABLE_THREAD_SAFETY=ON -DENABLE_READLINE=OFF -DENABLE_LITE_MODE=ON -DENABLE_FINANCE_MODE=ON ${extra_cmake_opt}"
     else
         if [[ "$os_version" == "22.03" || "$os_version" == "24.03" ]]; then
-            declare CMAKE_OPT="-DENABLE_MULTIPLE_NODES=OFF -DENABLE_THREAD_SAFETY=ON -DENABLE_MOT=ON -DENABLE_READLINE=ON -DENABLE_OPENEULER_MAJOR=ON ${extra_cmake_opt}"
+            declare CMAKE_OPT="-DENABLE_MULTIPLE_NODES=OFF -DENABLE_THREAD_SAFETY=ON -DENABLE_MOT=OFF -DENABLE_READLINE=OFF -DENABLE_LITE_MODE=ON -DENABLE_OPENEULER_MAJOR=ON ${extra_cmake_opt}"
         else
-            declare CMAKE_OPT="-DENABLE_MULTIPLE_NODES=OFF -DENABLE_THREAD_SAFETY=ON -DENABLE_READLINE=ON -DENABLE_MOT=ON ${extra_cmake_opt}"
+            declare CMAKE_OPT="-DENABLE_MULTIPLE_NODES=OFF -DENABLE_THREAD_SAFETY=ON -DENABLE_READLINE=OFF -DENABLE_LITE_MODE=ON -DENABLE_MOT=OFF ${extra_cmake_opt}"
         fi
     fi
     echo "[cmake options] cmake options is:${CMAKE_OPT}" >> "$LOG_FILE" 2>&1

@@ -93,6 +93,9 @@ public:
     void ResetNecessary();
 
 public:
+    //我自己加的开始
+    double m_copy_time = 0.0;   // SaveToMemory 累计拷贝耗时（秒）
+    //我自己加的结束
     // number of columns in outer child
     //
     int m_outCols;

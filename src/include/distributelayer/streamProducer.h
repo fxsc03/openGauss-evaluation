@@ -35,8 +35,115 @@
 #define FIXED_TYPE 5
 #define NAME_TYPE 6
 
+/* 轻量统计结构体，用于记录 producer 的发送性能 */
+/*
+ * StreamSendMonitor
+ * ------------------
+ * 用于监控每个 StreamProducer 的发送性能。
+ * 它会在 gs_memory_send() 内周期性地记录：
+ *   - 发送的 batch 数
+ *   - 累积的发送字节数
+ *   - 累积的数据 copy 耗时（微秒级）
+ *
+ * 在析构时（或手动调用 PrintStat）自动打印统计结果。
+ */
+// class StreamSendMonitor {
+// public:
+//     /*
+//      * 构造函数
+//      *  @param name : 当前 producer 的名称或标识符
+//      *
+//      * 初始化统计变量，并记录启动时间。
+//      */
+//     StreamSendMonitor(const char* name)
+//     {
+//         // 安全拷贝 producer 名称（最多 NAMEDATALEN-1 字节）
+//         errno_t rc = strncpy_s(m_name, NAMEDATALEN, name, NAMEDATALEN - 1);
+//         securec_check(rc, "\0", "\0");
+
+//         // 初始化统计变量
+//         m_totalBatches = 0;
+//         m_totalBytes = 0;
+//         m_totalTimeUs = 0.0;
+
+//         // 记录开始时间（用于计算总持续时间）
+//         gettimeofday(&m_startTime, NULL);
+//     }
+
+//     /*
+//      * 析构函数
+//      *
+//      * 在对象销毁时自动打印统计结果，
+//      * 通常发生在 StreamProducer 结束（deInit 或析构）时。
+//      */
+//     ~StreamSendMonitor()
+//     {
+//         PrintStat();
+//     }
+
+//     /*
+//      * AddSendStat
+//      * ------------
+//      * 由 gs_memory_send() 调用，用于累积每次发送的数据统计。
+//      *
+//      * @param bytes   : 本次发送的数据字节数
+//      * @param time_us : 本次发送耗时（微秒）
+//      */
+//     void AddSendStat(size_t bytes, double time_us)
+//     {
+//         m_totalBatches++;      // 累加 batch 数
+//         m_totalBytes += bytes; // 累加字节数
+//         m_totalTimeUs += time_us; // 累加耗时
+//     }
+
+//     /*
+//      * PrintStat
+//      * ----------
+//      * 打印当前监控结果到日志（LOG 级别）。
+//      *
+//      * 内容包括：
+//      *   - Producer 名称
+//      *   - 总批次数
+//      *   - 总字节数
+//      *   - 平均单批 copy 耗时（us）
+//      *   - Producer 存活总时长（秒）
+//      */
+//     void PrintStat()
+//     {
+//         struct timeval endTime;
+//         gettimeofday(&endTime, NULL);
+
+//         // 计算监控持续时间（微秒）
+//         double duration = (endTime.tv_sec - m_startTime.tv_sec) * 1e6 +
+//                           (endTime.tv_usec - m_startTime.tv_usec);
+
+//         if (m_totalBatches > 0) {
+//             ereport(LOG,
+//                 (errmodule(MOD_STREAM),
+//                  errmsg("[StreamMonitor] Producer=%s "
+//                         "Batches=%lu Bytes=%lu "
+//                         "AvgSendTime=%.2fus TotalTime=%.2fs",
+//                         m_name,
+//                         m_totalBatches,
+//                         m_totalBytes,
+//                         m_totalTimeUs / m_totalBatches, // 平均每批 copy 时间
+//                         duration / 1e6)));              // 总运行时间（秒）
+//         }
+//     }
+
+// private:
+//     char m_name[NAMEDATALEN];  // producer 名称或标识符
+//     uint64 m_totalBatches;     // 累积 batch 数
+//     uint64 m_totalBytes;       // 累积发送字节数
+//     double m_totalTimeUs;      // 累积发送耗时（微秒）
+//     struct timeval m_startTime; // 起始时间（构造时记录）
+// };
+
+
 class StreamProducer : public StreamObj {
 public:
+    // StreamSendMonitor* m_sendMonitor;
+
     StreamProducer(StreamKey key, PlannedStmt* pstmt, Stream* streamNode, MemoryContext context, int socketNum,
         StreamTransType type);
 

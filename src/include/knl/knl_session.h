@@ -44,7 +44,14 @@
 #define SRC_INCLUDE_KNL_KNL_SESSION_H_
 
 #include <signal.h>
-
+#include <x86intrin.h>  // 对于 __rdtsc()
+#include <cstdint>
+// #include <iostream>
+#include <linux/perf_event.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <cstring>
 #include "postgres.h"
 #ifdef ENABLE_HTAP
 #include "access/htap/borrow_mem_pool.h"
@@ -93,11 +100,320 @@ typedef struct knl_session_attr {
 #endif
 } knl_session_attr;
 
+class ThreadTSCProfiler {
+private:
+    uint64_t m_start_cycles = 0;
+    uint64_t m_total_cycles = 0;
+    uint64_t m_batch_count = 0;
+    bool m_is_running = false;
+    pid_t m_tid;
+
+public:
+    ThreadTSCProfiler() {
+        m_tid = syscall(SYS_gettid);
+        // elog(LOG, "Initialized TSC profiler for TID: %d", m_tid);
+    }
+
+    // 开始计时
+    void start() {
+        if (m_is_running) {
+            // elog(WARNING, "TSC profiler already running for thread %d", m_tid);
+            return;
+        }
+        
+        // 内存屏障，确保之前的指令都执行完毕
+        _mm_mfence();
+        m_start_cycles = __rdtsc();
+        _mm_lfence();  // 防止乱序执行
+        
+        m_is_running = true;
+    }
+
+    // 停止计时并累积周期数
+    void stop() {
+        if (!m_is_running) {
+            // elog(WARNING, "TSC profiler not running for thread %d", m_tid);
+            return;
+        }
+        
+        _mm_mfence();
+        uint64_t end_cycles = __rdtsc();
+        _mm_lfence();
+        
+        uint64_t cycles_this_batch = end_cycles - m_start_cycles;
+        m_total_cycles += cycles_this_batch;
+        m_batch_count++;
+        
+        m_is_running = false;
+        
+        // elog(DEBUG1, "Thread %d batch %llu: %llu cycles", 
+        //      m_tid, (unsigned long long)m_batch_count, (unsigned long long)cycles_this_batch);
+    }
+
+    // 获取当前批次的周期数（不停止计时）
+    uint64_t get_current_cycles() {
+        if (!m_is_running) {
+            return 0;
+        }
+        
+        _mm_mfence();
+        uint64_t current_cycles = __rdtsc();
+        _mm_lfence();
+        
+        return current_cycles - m_start_cycles;
+    }
+
+    struct CycleStats {
+        uint64_t cycles;
+        uint64_t batch_count;
+        double avg_cycles_per_batch;
+    };
+
+    CycleStats get_stats() const {
+        CycleStats stats;
+        stats.cycles = m_total_cycles;
+        stats.batch_count = m_batch_count;
+        stats.avg_cycles_per_batch = m_batch_count > 0 ? 
+            (double)m_total_cycles / m_batch_count : 0.0;
+        return stats;
+    }
+
+    // 打印统计信息
+    void print_stats() {
+        CycleStats stats = get_stats();
+        
+        elog(LOG, "=== Thread %d TSC Statistics ===", m_tid);
+        // if (!phase_info.empty()) {
+        //     elog(LOG, "Phase: %s", phase_info.c_str());
+        // }
+        elog(LOG, "Total batches: %llu", (unsigned long long)stats.batch_count);
+        elog(LOG, "Total cycles: %llu", (unsigned long long)stats.cycles);
+        elog(LOG, "Average cycles per batch: %.0f", stats.avg_cycles_per_batch);
+        
+        if (stats.batch_count == 0) {
+            elog(LOG, "⚠️  No batches recorded");
+        }
+    }
+
+    // 重置统计
+    void reset() {
+        m_total_cycles = 0;
+        m_batch_count = 0;
+        m_is_running = false;
+        elog(LOG, "Reset TSC statistics for thread %d", m_tid);
+    }
+
+    // 获取原始TSC值（用于自定义计时）
+    static uint64_t get_raw_tsc() {
+        _mm_mfence();
+        uint64_t tsc = __rdtsc();
+        _mm_lfence();
+        return tsc;
+    }
+
+    // 估算CPU频率（需要在已知时间间隔内测量）
+    static double estimate_cpu_frequency(uint64_t measurement_interval_us = 100000) {
+        uint64_t start = get_raw_tsc();
+        usleep(measurement_interval_us);  // 睡眠100ms
+        uint64_t end = get_raw_tsc();
+        
+        double cycles = end - start;
+        double frequency = cycles / (measurement_interval_us / 1000000.0);  // 转换为Hz
+        return frequency / 1e9;  // 转换为GHz
+    }
+};
+
+class ThreadPerfCacheProfiler {
+private:
+    struct perf_event_attr attr;
+    int fd_cache_ref;
+    int fd_cache_miss;
+    int m_parent_id;
+    pid_t m_tid;  // 线程ID
+    
+    // 添加累积统计成员变量
+    long long m_total_cache_ref = 0;
+    long long m_total_cache_miss = 0;
+    int m_batch_count = 0;
+    bool m_is_running = false;
+
+    static int perf_event_open(struct perf_event_attr *attr, pid_t pid,
+                              int cpu, int group_fd, unsigned long flags) {
+        return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
+    }
+
+public:
+    ThreadPerfCacheProfiler() : fd_cache_ref(-1), fd_cache_miss(-1) {
+        // 获取当前线程ID
+        m_tid = syscall(SYS_gettid);
+        
+        memset(&attr, 0, sizeof(attr));
+        attr.type = PERF_TYPE_HARDWARE;
+        attr.size = sizeof(attr);
+        attr.disabled = 1;
+        attr.exclude_kernel = 1;
+        attr.exclude_hv = 1;
+        attr.exclude_idle = 1;
+
+        // 关键：绑定到特定线程，而不是整个进程
+        // 使用 m_tid 而不是 0
+        attr.config = PERF_COUNT_HW_CACHE_REFERENCES;
+        fd_cache_ref = perf_event_open(&attr, m_tid, -1, -1, 0);
+        if (fd_cache_ref < 0) {
+            elog(WARNING, "Failed to open cache references for thread %d: %s", 
+                 m_tid, strerror(errno));
+        }
+        
+        attr.config = PERF_COUNT_HW_CACHE_MISSES;
+        fd_cache_miss = perf_event_open(&attr, m_tid, -1, -1, 0);
+        if (fd_cache_miss < 0) {
+            elog(WARNING, "Failed to open cache misses for thread %d: %s", 
+                 m_tid, strerror(errno));
+        }
+
+        // elog(LOG, "Initialized thread cache profiler for TID: %d", m_tid);
+    }
+
+    void start(int parent_id) {
+        if (m_is_running) {
+            return; // 防止重复start
+        }
+        m_parent_id = parent_id;
+        if (fd_cache_ref > 0) {
+            ioctl(fd_cache_ref, PERF_EVENT_IOC_RESET, 0);
+            ioctl(fd_cache_ref, PERF_EVENT_IOC_ENABLE, 0);
+        }
+        if (fd_cache_miss > 0) {
+            ioctl(fd_cache_miss, PERF_EVENT_IOC_RESET, 0);
+            ioctl(fd_cache_miss, PERF_EVENT_IOC_ENABLE, 0);
+        }
+        m_is_running = true;
+    }
+
+    void stop() {
+        if (!m_is_running) {
+            return;
+        }
+        
+        if (fd_cache_ref > 0) ioctl(fd_cache_ref, PERF_EVENT_IOC_DISABLE, 0);
+        if (fd_cache_miss > 0) ioctl(fd_cache_miss, PERF_EVENT_IOC_DISABLE, 0);
+
+        // 累积统计
+        CacheStats stats = read_stats();
+        m_total_cache_ref += stats.cache_references;
+        m_total_cache_miss += stats.cache_misses;
+        m_batch_count++;
+        
+        m_is_running = false;
+    }
+
+    struct CacheStats {
+        long long cache_references;
+        long long cache_misses;
+    };
+
+    CacheStats read_stats() {
+        CacheStats stats = {0, 0};
+        
+        if (fd_cache_ref > 0) {
+            ssize_t ret = read(fd_cache_ref, &stats.cache_references, sizeof(long long));
+            if (ret != sizeof(long long)) {
+                elog(WARNING, "Failed to read cache references for thread %d", m_tid);
+            }
+        }
+        if (fd_cache_miss > 0) {
+            ssize_t ret = read(fd_cache_miss, &stats.cache_misses, sizeof(long long));
+            if (ret != sizeof(long long)) {
+                elog(WARNING, "Failed to read cache misses for thread %d", m_tid);
+            }
+        }
+        
+        return stats;
+    }
+
+    // 单个batch的统计
+    void print_stats() {
+        CacheStats stats = read_stats();
+        
+        double total_hit_rate = stats.cache_references > 0 ? 
+            (double)(stats.cache_references - stats.cache_misses) / stats.cache_references * 100 : 0;
+
+        elog(LOG, "=== Thread %d - Single Batch ===", m_tid);
+        elog(LOG, "Cache References: %lld", stats.cache_references);
+        elog(LOG, "Cache Misses: %lld", stats.cache_misses);
+        elog(LOG, "Cache Hit Rate: %.2f%%", total_hit_rate);
+        
+        if (stats.cache_references == 0) {
+            elog(LOG, "⚠️  No cache events recorded");
+        }
+    }
+
+    // 平均统计（多个batch）
+    void print_average_stats() {
+        // if (m_batch_count == 0) {
+        //     elog(LOG, "No batches recorded for average statistics");
+        //     return;
+        // }
+        
+        double avg_cache_ref = (double)m_total_cache_ref / m_batch_count;
+        double avg_cache_miss = (double)m_total_cache_miss / m_batch_count;
+        double avg_hit_rate = avg_cache_ref > 0 ? 
+            (double)(avg_cache_ref - avg_cache_miss) / avg_cache_ref * 100 : 0;
+
+        elog(LOG, "==Stream Pnode %d= Thread %d - Average Stats (%d batches) === Avg Cache Hit Rate: %.2f%%", m_parent_id, m_tid, m_batch_count,avg_hit_rate);
+        // if (!phase_info.empty()) {
+        //     elog(LOG, "Phase: %s", phase_info.c_str());
+        // }
+        // elog(LOG, "Avg Cache References per batch: %.0f", avg_cache_ref);
+        // elog(LOG, "Avg Cache Misses per batch: %.0f", avg_cache_miss);
+        // elog(LOG, "", avg_hit_rate);
+        // elog(LOG, "Total References: %lld", m_total_cache_ref);
+        // elog(LOG, "Total Misses: %lld", m_total_cache_miss);
+        
+        // if (avg_cache_ref == 0) {
+        //     elog(LOG, "⚠️  No cache events recorded in any batch");
+        // } else if (avg_hit_rate < 70.0) {
+        //     elog(LOG, "🔴 POOR AVERAGE CACHE PERFORMANCE");
+        // } else if (avg_hit_rate > 90.0) {
+        //     elog(LOG, "✅ EXCELLENT AVERAGE CACHE PERFORMANCE");
+        // } else {
+        //     elog(LOG, "🟡 ACCEPTABLE AVERAGE CACHE PERFORMANCE");
+        // }
+    }
+
+    // 重置累积统计
+    void reset_accumulated_stats() {
+        m_total_cache_ref = 0;
+        m_total_cache_miss = 0;
+        m_batch_count = 0;
+        elog(LOG, "Reset accumulated statistics for thread %d", m_tid);
+    }
+
+    // 获取当前累积统计（不重置）
+    CacheStats get_accumulated_stats() const {
+        CacheStats stats;
+        stats.cache_references = m_total_cache_ref;
+        stats.cache_misses = m_total_cache_miss;
+        return stats;
+    }
+    
+    int get_batch_count() const {
+        return m_batch_count;
+    }
+
+    ~ThreadPerfCacheProfiler() {
+        if (fd_cache_ref > 0) close(fd_cache_ref);
+        if (fd_cache_miss > 0) close(fd_cache_miss);
+    }
+};
+
 typedef struct knl_u_stream_context {
     uint32 producer_dop;
 
     uint32 smp_id;
-
+    uint32 batch_num =0;
+    uint32 tt_rows =0;
+    double ht_access= 0;
     bool in_waiting_quit;
 
     bool dummy_thread;
@@ -114,6 +430,8 @@ typedef struct knl_u_stream_context {
 
     class StreamNodeGroup* global_obj;
 
+    class ThreadPerfCacheProfiler* trace_cache_obj;
+    class ThreadTSCProfiler* trace_tsc_obj;
     class StreamProducer* producer_obj;
 
     /* List of StreamNodeGroup belong to current session that are active in the backend */

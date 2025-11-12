@@ -57,6 +57,13 @@
 #include "distributelayer/streamTransportComm.h"
 #include "utils/numeric.h"
 #include "utils/numeric_gs.h"
+#include <unordered_map>
+#include <mutex>
+#include <pthread.h>
+#include <time.h>
+#include <sched.h>
+#include <cstdint>
+#include <unistd.h>
 
 #define attIsNull(ATT, BITS) (!((BITS)[(ATT) >> 3] & (1 << ((ATT)&0x07))))
 
@@ -470,6 +477,15 @@ VecStreamState* ExecInitVecStream(Stream* node, EState* estate, int eflags)
     return state;
 }
 
+static inline double elapsed_time(instr_time* starttime)
+{
+    instr_time endtime;
+    INSTR_TIME_SET_CURRENT(endtime);
+    INSTR_TIME_SUBTRACT(endtime, *starttime);
+    return INSTR_TIME_GET_DOUBLE(endtime);
+}
+
+
 VectorBatch* ExecVecStream(VecStreamState* node)
 {
     if (unlikely(node->isReady == false)) {
@@ -483,7 +499,37 @@ VectorBatch* ExecVecStream(VecStreamState* node)
 
     node->m_CurrentBatch->Reset(true);
 
+    // //我自己加的开始
+    // /* ---- 性能统计开始 ---- */
+    // instr_time start_time;
+    // INSTR_TIME_SET_CURRENT(start_time);
+    // //我自己加的结束
+
     if (node->StreamScan(node)) {
+        // //我自己加的开始
+        // double elapsed_ms = elapsed_time(&start_time);
+
+        // static long long total_rows = 0;
+        // static long long total_batches = 0;
+
+        // long long rows = node->m_CurrentBatch->m_rows;
+        // total_rows   += rows;
+        // total_batches++;
+
+        // if (elapsed_ms > 0) {
+        //     double rows_per_ms = (double)rows / elapsed_ms;
+        //     ereport(LOG,
+        //             (errmsg("[VecStream(%d)]: fetched %lld rows in %.3f ms "
+        //                     "(%.2f rows/ms), total %lld rows %lld batches",
+        //                     node->ss.ps.plan->plan_node_id,
+        //                     rows,
+        //                     elapsed_ms,
+        //                     rows_per_ms,
+        //                     total_rows,
+        //                     total_batches)));
+        // }
+        // /* ---- 性能统计结束 ---- */
+        // //我自己加的结束
         return node->m_CurrentBatch;
     } else {
         /* Finish receiving data from producers, can set network perf data now. */
@@ -509,3 +555,89 @@ void ExecEndVecStream(VecStreamState* node)
     if (outer_plan != NULL)
         ExecEndNode(outer_plan);
 }
+
+
+// //我自己加的开始
+// double sample_interval = 0.1;
+
+// std::unordered_map<pthread_t, double> last_cpu_time;
+
+// std::unordered_map<pthread_t, double> last_system_time;
+
+// std::mutex sample_mutex;
+//     // 获取当前线程的 CPU 利用率（0.0 ~ 1.0）
+// double get_thread_cpu_time() {
+//     struct timespec ts;
+//     if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0) {
+//         return ts.tv_sec + ts.tv_nsec * 1e-9;
+//     }
+//     return 0.0;
+// }
+
+// // 获取当前系统时间（单位：秒）
+// double get_system_time() {
+//     struct timespec ts;
+//     if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+//         return ts.tv_sec + ts.tv_nsec * 1e-9;
+//     }
+//     return 0.0;
+// }
+
+// // 获取当前线程所在的 NUMA 节点（假设每个 NUMA 有 32 个 CPU）
+// int get_current_numa_node() {
+//     int cpu = sched_getcpu();
+//     return cpu / 32; // 假设每个 NUMA 有 32 个 CPU
+// }
+
+// float get_cpu_utilization() {
+//     pthread_t thread_id = pthread_self();
+//     std::lock_guard<std::mutex> lock(sample_mutex);
+
+//     double current_cpu_time = get_thread_cpu_time();
+//     double current_system_time = get_system_time();
+
+//     double delta_cpu_time = 0.0;
+//     double delta_system_time = 0.0;
+
+//     if (last_cpu_time.find(thread_id) != last_cpu_time.end()) {
+//         delta_cpu_time = current_cpu_time - last_cpu_time[thread_id];
+//         delta_system_time = current_system_time - last_system_time[thread_id];
+//     }
+
+//     // 更新上次采样时间
+//     last_cpu_time[thread_id] = current_cpu_time;
+//     last_system_time[thread_id] = current_system_time;
+
+//     if (delta_system_time > 0.0) {
+//         return static_cast<float>(delta_cpu_time / delta_system_time);
+//     }
+
+//     return 0.0f;
+// }
+
+// static std::vector<float> g_pressure_metrics;
+// static std::mutex g_pressure_mtx;
+
+// void update_pressure_metrics(int numa, float util) {
+//     std::lock_guard<std::mutex> lock(g_pressure_mtx);
+
+//     if ((size_t)numa >= g_pressure_metrics.size()) {
+//         g_pressure_metrics.resize(numa + 1, 0.0f);
+//     }
+
+//     g_pressure_metrics[numa] = util;
+
+//     ereport(LOG,
+//             (errmsg("[WLM] NUMA node %d CPU utilization updated: %.2f%%", numa, util * 100)));
+// }
+
+
+// void update_scheduler_utilization() {
+//     int numa = get_current_numa_node();
+//     float util = get_cpu_utilization();
+
+//     update_pressure_metrics(numa, util);
+// }
+
+
+// //我自己加的结束

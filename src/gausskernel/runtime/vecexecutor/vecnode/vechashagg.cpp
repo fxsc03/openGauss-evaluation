@@ -21,6 +21,7 @@
  *
  * ---------------------------------------------------------------------------------------
  */
+#include <chrono>
 #include "postgres.h"
 #include "knl/knl_variable.h"
 
@@ -388,12 +389,31 @@ void HashAggRunner::BuildHashTable(int64 old_size)
 void HashAggRunner::Build()
 {
     VectorBatch* outer_batch = NULL;
+    // //我添加的开始
+    // long long total_rows = 0;
+    // long long total_batches = 0;
+    // double time_getbatch = 0.0;
+    // //我添加的结束
 
     WaitState old_status = pgstat_report_waitstatus(STATE_EXEC_HASHAGG_BUILD_HASH);
     for (;;) {
+        // //我添加的开始
+        // instr_time t1, t2;
+        // /* --- 测 getBatch 时间 --- */
+        // INSTR_TIME_SET_CURRENT(t1);
+        // //我添加的结束
         outer_batch = m_hashSource->getBatch();
+        // //我添加的开始
+        // INSTR_TIME_SET_CURRENT(t2);
+        // time_getbatch += elapsed_time(&t1);
+        // //我添加的结束
+
         if (unlikely(BatchIsNull(outer_batch)))
             break;
+        // //我添加的开始
+        // total_rows   += outer_batch->m_rows;
+        // total_batches++;
+        // //我添加的结束
         (this->*m_buildFun)(outer_batch);
     }
     (void)pgstat_report_waitstatus(old_status);
@@ -408,6 +428,19 @@ void HashAggRunner::Build()
         m_runtime->ss.ps.instrument->sorthashinfo.hashagg_time = m_hashagg_time;
         m_runtime->ss.ps.instrument->sorthashinfo.hashbuild_time = m_hashbuild_time;
     }
+    
+    // //我添加的开始
+    // if (total_batches > 0) {
+    //     elog(LOG,
+    //          "[VecHashAgg(%d) Build Phase]: getBatch() fetched %lld rows, %lld batches in %.2f ms "
+    //          "(%.2f rows/ms)",
+    //          m_runtime->ss.ps.plan->plan_node_id,
+    //          total_rows,
+    //          total_batches,
+    //          time_getbatch,
+    //          (time_getbatch > 0) ? (double)total_rows / time_getbatch : 0.0);
+    // }
+    // //我添加的结束
 
     m_finish = true;
 }
@@ -424,6 +457,13 @@ VectorBatch* HashAggRunner::Probe()
     VectorBatch* p_res = NULL;
     int i = 0;
     int j;
+
+    // //我自己加的开始
+    // // ---- 新增: probe 计时开始 ----
+    // static double m_probe_time = 0.0; 
+    // instr_time start_time;
+    // INSTR_TIME_SET_CURRENT(start_time);
+    // //我自己加的结束
 
     m_scanBatch->Reset();
 
@@ -475,8 +515,13 @@ VectorBatch* HashAggRunner::Probe()
                 m_statusLog.lastCell = NULL;
                 m_statusLog.lastIdx = i + 1;
                 m_statusLog.lastSeg = j;
-            } else
+            } else{
+                // //我自己加的开始
+                // // ---- 新增: 累积 probe 时间 ----
+                // m_probe_time += elapsed_time(&start_time);
+                // //我自己加的结束
                 return NULL;  // all end;
+                }
         } else {
             if (m_scanBatch->m_rows > 0) {
                 p_res = ProducerBatch();
@@ -488,6 +533,31 @@ VectorBatch* HashAggRunner::Probe()
         }
     }
 
+    // //我自己加的开始
+    // // ---- 新增: 累积 probe 时间 ----
+    // m_probe_time += elapsed_time(&start_time);
+
+    // // ---- 可选: 打印 probe 阶段性能 ----
+    // if (p_res != NULL) {
+    //     static long long total_probe_rows = 0;
+    //     static long long total_probe_batches = 0;
+
+    //     total_probe_rows   += p_res->m_rows;
+    //     total_probe_batches++;
+
+    //     double elapsed_ms = m_probe_time;
+    //     if (elapsed_ms > 0) {
+    //         double rows_per_ms = (double)total_probe_rows / elapsed_ms;
+    //         elog(LOG,
+    //              "[VecHashAgg(%d) Probe Phase]: processed %lld rows, %lld batches in %.2f ms (%.2f rows/ms)",
+    //              m_runtime->ss.ps.plan->plan_node_id,
+    //              total_probe_rows,
+    //              total_probe_batches,
+    //              elapsed_ms,
+    //              rows_per_ms);
+    //     }
+    // }
+    // //我自己加的结束
     return p_res;
 }
 
@@ -691,7 +761,7 @@ void HashAggRunner::buildAggTbl(VectorBatch* batch)
     int64 pos;
 
     INSTR_TIME_SET_CURRENT(start_time);
-
+    auto build_start = std::chrono::high_resolution_clock::now();
     /*
      * mark if buildAggTbl has been codegened or not
      */
@@ -780,16 +850,47 @@ void HashAggRunner::buildAggTbl(VectorBatch* batch)
     }
 
     m_hashbuild_time += elapsed_time(&start_time);
+    auto build_end = std::chrono::high_resolution_clock::now();
+                auto build_duration = std::chrono::duration_cast<std::chrono::microseconds>(build_end - build_start);
+                double build_time_ms = build_duration.count() / 1000.0;
+                printf("Batchbuild time %.3fms\n",build_time_ms);
     INSTR_TIME_SET_CURRENT(start_time);
     if (m_runtime->jitted_batchagg)
         ((vecbatchagg_func)(m_runtime->jitted_batchagg))(this, m_Loc, batch, m_aggIdx);
     else
         BatchAggregation(batch);
     m_hashagg_time += elapsed_time(&start_time);
-
+    auto agg_end = std::chrono::high_resolution_clock::now();
+                auto agg_duration = std::chrono::duration_cast<std::chrono::microseconds>(agg_end - build_end);
+                double agg_time_ms = agg_duration.count() / 1000.0;
+                printf("BatchAggregation time %.3fms\n",agg_time_ms);
     /* we can reset the memory safely per batch line*/
     if (m_spillToDisk)
         MemoryContextReset(m_filesource->m_context);
+    // //我添加的开始
+    // /* -------------------------------
+    //  * 聚合性能统计
+    //  * ------------------------------- */
+    // static long long total_rows = 0;
+    // static long long total_batches = 0;
+
+    // total_rows   += batch->m_rows;
+    // total_batches++;
+
+    // double elapsed_ms = m_hashagg_time;
+    // if (elapsed_ms > 0) {
+    //     double rows_per_ms = (double)total_rows / elapsed_ms;
+
+    //     elog(LOG,
+    //          "[VecHashAgg(%d) buildAggTbl] processed %lld rows, %lld batches "
+    //          "in %.2f ms (%.2f rows/ms)",
+    //          m_runtime->ss.ps.plan->plan_node_id,
+    //          total_rows,
+    //          total_batches,
+    //          elapsed_ms,
+    //          rows_per_ms);
+    // }
+    // //我添加的结束
 }
 
 /*

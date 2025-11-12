@@ -245,12 +245,14 @@ VectorBatch* ExecVecHashJoin(VecHashJoinState* node)
 
                     ((SonicHashJoin*)(node->hashTbl))->Build();
                     rows = ((SonicHashJoin*)(node->hashTbl))->getRows();
+                    //elog(LOG, "[VecHashJoin(%d)]: Using SonicHashJoin",(node->js.ps.plan)->plan_node_id);//我自己加的
                 } else {
                     if (node->hashTbl == NULL)
                         node->hashTbl = New(CurrentMemoryContext) HashJoinTbl(node);
 
                     ((HashJoinTbl*)(node->hashTbl))->Build();
                     rows = ((HashJoinTbl*)(node->hashTbl))->getRows();
+                    //elog(LOG, "[VecHashJoin(%d)]: Using HashJoinTbl",(node->js.ps.plan)->plan_node_id);//我自己加的
                 }
 
                 /* Early free right tree after hash table built */
@@ -297,6 +299,20 @@ VectorBatch* ExecVecHashJoin(VecHashJoinState* node)
                             plan_state->instrument->sorthashinfo.hashagg_time =
                                 ((HashJoinTbl*)(node->hashTbl))->m_probe_time;
                     }
+                    // //我自己加的开始
+                    // // ---- 打印累计 probe 时间 ----
+                    // if (IS_SONIC_HASH(node)) {
+                    //     elog(LOG,
+                    //      "[VecHashJoin(%d) Probe]: total probe time = %.2f ms",
+                    //      (node->js.ps.plan)->plan_node_id,
+                    //      ((SonicHashJoin*)(node->hashTbl))->m_probe_time * 1000.0);
+                    // } else {
+                    //     elog(LOG,
+                    //      "[VecHashJoin(%d) Probe]: total probe time = %.2f ms",
+                    //     (node->js.ps.plan)->plan_node_id,
+                    //     ((HashJoinTbl*)(node->hashTbl))->m_probe_time * 1000.0);
+                    // }
+                    // //我自己加的结束
 
                     ExecEarlyFree(outerPlanState(node));
                     EARLY_FREE_LOG(elog(LOG,
@@ -916,6 +932,20 @@ void HashJoinTbl::Build()
     /* release the buffer in file handler */
     if (m_buildFileSource)
         m_buildFileSource->ReleaseAllFileHandlerBuffer();
+
+    // //我自己加的开始
+    // // ✅ 输出 SaveToMemory 拷贝累计时间
+    // elog(LOG,
+    //      "[VecHashJoin SaveToMemory @ node %d]: total accumulated copy time = %.2f ms",
+    //      plan_state->plan->plan_node_id,
+    //      m_copy_time * 1000.0);
+
+    // // ✅ 输出 Build 阶段总体耗时
+    // elog(LOG,
+    //      "[VecHashJoin Build @ node %d]: total build time = %.2f ms",
+    //      plan_state->plan->plan_node_id,
+    //      m_build_time * 1000.0);
+    // //我自己加的结束
 }
 
 /*
@@ -1135,6 +1165,12 @@ void HashJoinTbl::SaveToMemory(VectorBatch* batch)
     if (complicate_join_key)
         CalcComplicateHashVal(batch, m_runtime->hj_InnerHashKeys, true);
 
+    // //我自己加的开始
+    // //static double total_copy_time = 0.0;  // 局部静态变量保存累计时间
+    // instr_time copy_start;
+    // INSTR_TIME_SET_CURRENT(copy_start);
+    // //我自己加的结束
+
     for (int j = 0; j < cols; j++) {
         ScalarVector* p_vector = &batch->m_arr[j];
         cell = cell_arr;
@@ -1155,6 +1191,16 @@ void HashJoinTbl::SaveToMemory(VectorBatch* batch)
             }
         }
     }
+    // //我自己加的开始
+    // double copy_ms = elapsed_time(&copy_start);
+    // //total_copy_time += copy_ms;  // 累加到静态变量
+    // m_copy_time += copy_ms;  // 累加到成员变量
+
+    // // elog(LOG,
+    // //      "[VecHashJoin SaveToMemory @ node %d]: current batch copy %d rows × %d cols took %.2f ms, total accumulated copy time = %.2f ms",
+    // //      m_runtime->js.ps.plan->plan_node_id,
+    // //      rows, cols, copy_ms * 1000.0, total_copy_time * 1000.0);
+    //  //我自己加的结束
 
     if (complicate_join_key) {
         cell = cell_arr;
@@ -1168,6 +1214,7 @@ void HashJoinTbl::SaveToMemory(VectorBatch* batch)
     m_cache = lcons(cell_arr, m_cache);
     cell_arr->flag.m_rows = rows;
     m_tupleCount += rows;
+
 }
 
 template <bool complicate_join_key>

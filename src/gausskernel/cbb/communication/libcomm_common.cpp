@@ -45,6 +45,12 @@ int binary_semaphore::init() {
     atomic_set(&waiting_count, 0);
     atomic_set(&b_destroy, 0);
     atomic_set(&destroy_wait, 0);
+    // 初始化统计字段
+    total_wakeup_latency = 0;
+    wakeup_count = 0;
+    max_wakeup_latency = 0;
+    last_signal_time = std::chrono::steady_clock::time_point::min();
+
     int err = pthread_cond_init(&cond, NULL);
     if (err != 0)
         return err;
@@ -80,9 +86,11 @@ void binary_semaphore::reset() {
 
  void binary_semaphore::post() {
     LIBCOMM_PTHREAD_MUTEX_LOCK(&mutex);
+    // last_signal_time = std::chrono::steady_clock::now();
     /* thread will poll up when someone has posted before */
     atomic_set(&b_flag, 1);
     if (waiting_count > 0) {
+        // auto now = std::chrono::steady_clock::now();
         LIBCOMM_PTHREAD_COND_SIGNAL(&cond);
     }
     LIBCOMM_PTHREAD_MUTEX_UNLOCK(&mutex);
@@ -107,10 +115,31 @@ int binary_semaphore::wait() {
 
     int ret = 0;
     LIBCOMM_PTHREAD_MUTEX_LOCK(&mutex);
+    // 记录进入wait前的signal时间
+    // auto signal_time_before_wait = last_signal_time;
+    // auto wait_start_time = std::chrono::steady_clock::now();
+
     while (!b_flag) {
         atomic_add(&waiting_count, 1);
         ret = pthread_cond_wait(&cond, &mutex);
         atomic_sub(&waiting_count, 1);
+        // 线程被唤醒后，计算唤醒延迟
+        // if (ret == 0 && b_flag) {
+        //     auto wakeup_time = std::chrono::steady_clock::now();
+            
+        //     // 只有当signal时间在wait开始之后才统计（避免使用旧的signal时间）
+        //     if (last_signal_time > signal_time_before_wait) {
+        //         uint64_t latency_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        //             wakeup_time - last_signal_time).count();
+                
+        //         // 更新统计信息
+        //         total_wakeup_latency += latency_ns;
+        //         wakeup_count++;
+        //         if (latency_ns > max_wakeup_latency) {
+        //             max_wakeup_latency = latency_ns;
+        //         }
+        //     }
+        // }
     }
 
     if (b_destroy)
@@ -122,6 +151,41 @@ int binary_semaphore::wait() {
 
     return ret;
 }
+
+void binary_semaphore::print_statistics() {
+    LIBCOMM_PTHREAD_MUTEX_LOCK(&mutex);
+    
+    if (wakeup_count > 0) {
+        uint64_t avg_latency = total_wakeup_latency / wakeup_count;
+        printf("=== Binary Semaphore Wakeup Statistics ===\n");
+        printf("Total wakeups: %lu\n", wakeup_count);
+        printf("Average wakeup latency: %lu ns (%.3f ms)\n", 
+               avg_latency, avg_latency / 1000000.0);
+        printf("Maximum wakeup latency: %lu ns (%.3f ms)\n", 
+               max_wakeup_latency, max_wakeup_latency / 1000000.0);
+        printf("=========================================\n");
+    } else {
+        printf("No wakeup statistics available.\n");
+    }
+    
+    LIBCOMM_PTHREAD_MUTEX_UNLOCK(&mutex);
+}
+
+void binary_semaphore::get_statistics(uint64_t* avg_latency, uint64_t* max_latency, uint64_t* count) {
+    LIBCOMM_PTHREAD_MUTEX_LOCK(&mutex);
+    
+    *count = wakeup_count;
+    *max_latency = max_wakeup_latency;
+    
+    if (wakeup_count > 0) {
+        *avg_latency = total_wakeup_latency / wakeup_count;
+    } else {
+        *avg_latency = 0;
+    }
+    
+    LIBCOMM_PTHREAD_MUTEX_UNLOCK(&mutex);
+}
+
 
 void binary_semaphore::destroy_wait_add() {
     atomic_add(&destroy_wait, 1);
@@ -209,6 +273,14 @@ void hash_entry::_release_destroy() {
 
 int hash_entry::_timewait(int timeout) {
     return sem.timed_wait(timeout);
+}
+
+void hash_entry::_print_statistics() {
+    sem.print_statistics();
+}
+
+void hash_entry::_get_statistics(uint64_t* avg_latency, uint64_t* max_latency, uint64_t* count) {
+    sem.get_statistics(avg_latency, max_latency, count);
 }
 
 void node_sock::reset_all() {

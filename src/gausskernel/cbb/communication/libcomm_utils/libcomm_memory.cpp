@@ -93,8 +93,11 @@ void gs_memory_init_entry(StreamSharedContext* sharedContext, int consumerNum, i
 
     poll_entrys = (struct hash_entry**)palloc(sizeof(struct hash_entry*) * consumerNum);
     quota_entrys = (struct hash_entry***)palloc(sizeof(struct hash_entry**) * consumerNum);
-
+    sharedContext->processed_batches = (uint64**)palloc(sizeof(uint64*) * consumerNum);
+    sharedContext->processed_rows = (uint64**)palloc(sizeof(uint64*) * consumerNum);
     for (int i = 0; i < consumerNum; i++) {
+        sharedContext->processed_batches[i] = (uint64*)palloc(sizeof(uint64) * producerNum);
+        sharedContext->processed_rows[i] = (uint64*)palloc(sizeof(uint64) * producerNum);
         entry = (struct hash_entry*)palloc(sizeof(struct hash_entry));
         (void)entry->_init();
         poll_entrys[i] = entry;
@@ -199,7 +202,9 @@ void gs_memory_send(
         -1,
         u_sess->stream_cxt.producer_obj->getParentPlanNodeId(),
         global_node_definition ? global_node_definition->num_nodes : -1);
-
+    // struct timeval stream_start, stream_end;
+    // struct timeval copy_start, copy_end;
+    // gettimeofday(&stream_start, NULL);
     StreamTimeSendStart(t_thrd.pgxc_cxt.GlobalNetInstr);
     entry = sharedContext->quota_entrys[nthChannel][u_sess->stream_cxt.smp_id];
     for (;;) {
@@ -228,8 +233,12 @@ void gs_memory_send(
         (void)entry->_timewait(SINGLE_WAITQUOTA);
         StreamTimeWaitQuotaEnd(t_thrd.pgxc_cxt.GlobalNetInstr);
     }
-
+    // gettimeofday(&stream_end, NULL);
+    // gettimeofday(&copy_start, NULL);
     StreamTimeCopyStart(t_thrd.pgxc_cxt.GlobalNetInstr);
+    // u_sess->stream_cxt.trace_cache_obj->start(u_sess->stream_cxt.producer_obj->m_streamNode->scan.plan.plan_node_id);
+    // struct timeval copy_start, copy_end;
+    // gettimeofday(&copy_start, NULL);
     /* Copy data to shared context. */
     if (sharedContext->vectorized) {
         Assert(sharedContext->sharedBatches != NULL);
@@ -240,8 +249,12 @@ void gs_memory_send(
             Assert(batch->m_rows == 0);
             batch->Copy<true, false>(batchsrc);
             ready_to_send = true;
+            sharedContext->processed_batches[nthChannel][u_sess->stream_cxt.smp_id]++;
+            sharedContext->processed_rows[nthChannel][u_sess->stream_cxt.smp_id] += batchsrc->m_rows;
         } else {
             batch->CopyNth(batchsrc, nthRow);
+            sharedContext->processed_batches[nthChannel][u_sess->stream_cxt.smp_id]++;
+            sharedContext->processed_rows[nthChannel][u_sess->stream_cxt.smp_id] += batchsrc->m_rows;
             if (BatchMaxSize == batch->m_rows) {
                 ready_to_send = true;
             }
@@ -256,8 +269,19 @@ void gs_memory_send(
             ready_to_send = true;
         }
     }
-    StreamTimeCopyEnd(t_thrd.pgxc_cxt.GlobalNetInstr);
+    // gettimeofday(&copy_end, NULL);
+    // double elapsed = (copy_end.tv_sec - copy_start.tv_sec) * 1e6 +
+    //                 (copy_end.tv_usec - copy_start.tv_usec);
+    // size_t bytes = batchsrc->m_rows * batchsrc->m_cols * sizeof(ScalarValue);
 
+    // if (u_sess->stream_cxt.producer_obj &&
+    // u_sess->stream_cxt.producer_obj->m_sendMonitor) {
+    // u_sess->stream_cxt.producer_obj->m_sendMonitor->AddSendStat(bytes, elapsed);
+    // }
+    // u_sess->stream_cxt.trace_cache_obj->stop();
+    StreamTimeCopyEnd(t_thrd.pgxc_cxt.GlobalNetInstr);
+    //每个batch都要先加锁，确保对信号量状态的修改和线程等待计数的操作是原子安全的。if (waiting_count > 0) { LIBCOMM_PTHREAD_COND_SIGNAL(&cond); }：如果有线程正在等待该信号量（waiting_count 记录等待线程数），则通过条件变量 cond 唤醒其中一个等待线程，让它可以继续执行（获取信号量）。最后解锁，允许其他线程操作信号量。
+    //统计唤醒次数和唤醒开销
     /* send the signal if copy finished */
     if (ready_to_send) {
 #ifdef __aarch64__
@@ -375,7 +399,7 @@ char gs_find_memory_data(StreamState* node, int* waitnode_count)
     bool is_conn_end = false;
     int waitnodeCount = 0;
     struct hash_entry* entry = NULL;
-
+    
     /* Check if there is available data, and scan from last time location. */
     do {
         i++;
@@ -542,6 +566,7 @@ void gs_memory_send_finish(StreamSharedContext* sharedContext, int connNum)
         entry = sharedContext->poll_entrys[i];
         entry->_signal();
     }
+    
 }
 
 /*
@@ -558,7 +583,30 @@ void gs_memory_close_conn(StreamSharedContext* sharedContext, int connNum, int c
     for (int i = 0; i < connNum; i++) {
         /* Set flags. */
         sharedContext->is_connect_end[consumerId][i] = true;
-
+        // uint64 total_batches = 0;
+        // uint64 total_rows = 0;
+        // // int active_threads = 0;
+        
+        // elog(LOG, "Stream Copy Statistics for producer %d:", i);
+        
+        // for (int smp_id = 0; smp_id < i; smp_id++) {
+            // uint64 batches = sharedContext->processed_batches[consumerId][i];
+            // uint64 rows = sharedContext->processed_rows[consumerId][i];
+            // elog(LOG,"stream parent_node %d",u_sess->stream_cxt.producer_obj->getParentPlanNodeId());
+            
+            // if (batches > 0) {
+            //     elog(LOG, "  SMP%d: %lu batches, %lu rows (avg %.2f rows/batch)", 
+            //          i, batches, rows, rows / (double)batches);
+            //     // total_batches += batches;
+            //     // total_rows += rows;
+            // }
+        // }
+        
+        // if (total_batches > 0) {
+        //     elog(LOG, "Channel %d Summary: %lu total batches, %lu total rows, %d active threads, "
+        //          "average %.2f batches/thread", 
+        //          consumerId);
+        // // }
         /*
          * Send signal to the producers which may be still waiting quota,
          * in a query like "limit XXX", when consumer don't need data anymore,
@@ -567,5 +615,6 @@ void gs_memory_close_conn(StreamSharedContext* sharedContext, int connNum, int c
         entry = sharedContext->quota_entrys[consumerId][i];
         entry->_signal();
     }
+    // u_sess->stream_cxt.trace_cache_obj->print_average_stats();
 }
 

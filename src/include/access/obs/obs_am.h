@@ -133,19 +133,19 @@ typedef struct OBSReadWriteHandler {
     /* size_t	m_offset;	=>get_cond.start_byte */
     /* obs_bucket_context m_bucketCtx; =>m_option.bucket_options */
 #ifndef ENABLE_LITE_MODE
-    obs_options m_option;
-    obs_object_info m_object_info;
+    // obs_options m_option;
+    // obs_object_info m_object_info;
 
-    union {
-        obs_get_conditions get_cond;
-        obs_put_properties put_cond;
-        /*
-         * S3ListParts
-         * S3ListVersions
-         * ...
-         * More OBS operation properties added here
-         */
-    } properties;
+    // union {
+    //     obs_get_conditions get_cond;
+    //     obs_put_properties put_cond;
+    //     /*
+    //      * S3ListParts
+    //      * S3ListVersions
+    //      * ...
+    //      * More OBS operation properties added here
+    //      */
+    // } properties;
 #endif
 } OBSReadWriteHandler;
 
@@ -153,7 +153,7 @@ typedef struct list_service_data {
     int headerPrinted;
     int allDetails;
 #ifndef ENABLE_LITE_MODE
-    obs_status ret_status;
+    // obs_status ret_status;
 #endif
 } list_service_data;
 
