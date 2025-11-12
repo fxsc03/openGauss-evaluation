@@ -168,7 +168,7 @@ StreamProducer::StreamProducer(
     rc = memcpy_s(m_plan, sizeof(PlannedStmt), pstmt, sizeof(PlannedStmt));
     securec_check(rc, "\0", "\0");
 
-    m_sendMonitor = new StreamSendMonitor("StreamProducer");
+    //m_sendMonitor = new StreamSendMonitor("StreamProducer");
 }
 
 StreamProducer::~StreamProducer()
@@ -195,10 +195,10 @@ StreamProducer::~StreamProducer()
     m_distributeIdx = NULL;
     m_skewState = NULL;
     
-    if (m_sendMonitor) {
-        delete m_sendMonitor;
-        m_sendMonitor = NULL;
-    }
+    // if (m_sendMonitor) {
+    //     delete m_sendMonitor;
+    //     m_sendMonitor = NULL;
+    // }
 }
 
 /*
