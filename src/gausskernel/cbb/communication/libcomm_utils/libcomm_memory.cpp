@@ -237,8 +237,8 @@ void gs_memory_send(
     // gettimeofday(&copy_start, NULL);
     StreamTimeCopyStart(t_thrd.pgxc_cxt.GlobalNetInstr);
     // u_sess->stream_cxt.trace_cache_obj->start(u_sess->stream_cxt.producer_obj->m_streamNode->scan.plan.plan_node_id);
-    // struct timeval copy_start, copy_end;
-    // gettimeofday(&copy_start, NULL);
+    struct timeval copy_start, copy_end;
+    gettimeofday(&copy_start, NULL);
     /* Copy data to shared context. */
     if (sharedContext->vectorized) {
         Assert(sharedContext->sharedBatches != NULL);
@@ -269,15 +269,15 @@ void gs_memory_send(
             ready_to_send = true;
         }
     }
-    // gettimeofday(&copy_end, NULL);
-    // double elapsed = (copy_end.tv_sec - copy_start.tv_sec) * 1e6 +
-    //                 (copy_end.tv_usec - copy_start.tv_usec);
-    // size_t bytes = batchsrc->m_rows * batchsrc->m_cols * sizeof(ScalarValue);
+    gettimeofday(&copy_end, NULL);
+    double elapsed = (copy_end.tv_sec - copy_start.tv_sec) * 1e6 +
+                    (copy_end.tv_usec - copy_start.tv_usec);
+    size_t bytes = batchsrc->m_rows * batchsrc->m_cols * sizeof(ScalarValue);
 
-    // if (u_sess->stream_cxt.producer_obj &&
-    // u_sess->stream_cxt.producer_obj->m_sendMonitor) {
-    // u_sess->stream_cxt.producer_obj->m_sendMonitor->AddSendStat(bytes, elapsed);
-    // }
+    if (u_sess->stream_cxt.producer_obj &&
+    u_sess->stream_cxt.producer_obj->m_sendMonitor) {
+    u_sess->stream_cxt.producer_obj->m_sendMonitor->AddSendStat(bytes, elapsed);
+    }
     // u_sess->stream_cxt.trace_cache_obj->stop();
     StreamTimeCopyEnd(t_thrd.pgxc_cxt.GlobalNetInstr);
     //每个batch都要先加锁，确保对信号量状态的修改和线程等待计数的操作是原子安全的。if (waiting_count > 0) { LIBCOMM_PTHREAD_COND_SIGNAL(&cond); }：如果有线程正在等待该信号量（waiting_count 记录等待线程数），则通过条件变量 cond 唤醒其中一个等待线程，让它可以继续执行（获取信号量）。最后解锁，允许其他线程操作信号量。
