@@ -111,6 +111,7 @@ void gs_memory_init_entry(StreamSharedContext* sharedContext, int consumerNum, i
 
     sharedContext->poll_entrys = poll_entrys;
     sharedContext->quota_entrys = quota_entrys;
+
 }
 
 /*
@@ -243,6 +244,15 @@ void gs_memory_send(
     if (sharedContext->vectorized) {
         Assert(sharedContext->sharedBatches != NULL);
         batch = sharedContext->sharedBatches[nthChannel][u_sess->stream_cxt.smp_id];
+
+        // 当前线程 CPU
+        int src_cpu = sched_getcpu();
+        // 映射 NUMA
+        int src_numa = cpu_to_numa_node(src_cpu);
+
+        batch->producer_cpu  = src_cpu;
+        batch->producer_numa = src_numa;
+
         /* data copy */
         if (-1 == nthRow) {
             /* Do deep copy of all rows, for local roundrobin & local broadcast. */
@@ -344,6 +354,22 @@ bool gs_consume_memory_data(StreamState* node, int loc)
         }
 
         batchdst->Copy<true, false>(batchsrc);
+
+        // 获取目标 CPU/NUMA
+        int dst_cpu  = sched_getcpu();
+        int dst_numa = cpu_to_numa_node(dst_cpu);
+
+        // 获取生产端 CPU/NUMA
+        int src_cpu  = batchsrc->producer_cpu;
+        int src_numa = batchsrc->producer_numa;   
+
+        elog(LOG,
+            "[BatchPath] smp=%d loc=%d "
+            "src={cpu=%d numa=%d} -> dst={cpu=%d numa=%d} rows=%d",
+            u_sess->stream_cxt.smp_id, loc,
+            src_cpu, src_numa,
+            dst_cpu, dst_numa,
+            batchsrc->m_rows);
 
         batchsrc->Reset();
     } else {

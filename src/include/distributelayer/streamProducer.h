@@ -27,6 +27,7 @@
 
 #include "distributelayer/streamCore.h"
 
+
 #define VALUE_TYPE 0
 #define NUMERIC_TYPE 1
 #define VARLENA_TYPE 2
@@ -34,6 +35,29 @@
 #define TID_TYPE 4
 #define FIXED_TYPE 5
 #define NAME_TYPE 6
+
+inline int cpu_to_numa_node(int cpu)
+{
+    if (cpu < 0) return -1;
+
+    // node0: 0-23, 96-119
+    if ((cpu >= 0 && cpu <= 23) || (cpu >=96 && cpu <=119))
+        return 0;
+
+    // node1: 24-47, 120-143
+    if ((cpu >=24 && cpu <=47) || (cpu >=120 && cpu <=143))
+        return 1;
+
+    // node2: 48-71, 144-167
+    if ((cpu >=48 && cpu <=71) || (cpu >=144 && cpu <=167))
+        return 2;
+
+    // node3: 72-95, 168-191
+    if ((cpu >=72 && cpu <=95) || (cpu >=168 && cpu <=191))
+        return 3;
+
+    return -1; // fallback
+}
 
 /* 轻量统计结构体，用于记录 producer 的发送性能 */
 /*
@@ -108,30 +132,47 @@ public:
      *   - 平均单批 copy 耗时（us）
      *   - Producer 存活总时长（秒）
      */
+
     void PrintStat()
     {
-        printf("printStat");
-        ereport(DEBUG1, (errmsg("PrintStat called: batches=%lu bytes=%lu", m_totalBatches, m_totalBytes)));
+        // 调试输出（可见即可）
+        elog(DEBUG1, "PrintStat called: batches=%lu bytes=%lu",
+            m_totalBatches, m_totalBytes);
+
+        // 获取线程 ID（真正的 TID）
+        pid_t tid = syscall(SYS_gettid);
+
+        // 获取当前 CPU ID
+        int cpu = sched_getcpu();
+
+        // 直接根据 CPU 推算 NUMA node
+        int node = cpu_to_numa_node(cpu);
+
+        // 计算时间
         struct timeval endTime;
         gettimeofday(&endTime, NULL);
 
-        // 计算监控持续时间（微秒）
         double duration = (endTime.tv_sec - m_startTime.tv_sec) * 1e6 +
-                          (endTime.tv_usec - m_startTime.tv_usec);
+                      (endTime.tv_usec - m_startTime.tv_usec);
 
+        // 正常输出统计
         if (m_totalBatches > 0) {
-            ereport(LOG,
-                (errmodule(MOD_STREAM),
-                 errmsg("[StreamMonitor] Producer=%s "
-                        "Batches=%lu Bytes=%lu "
-                        "AvgSendTime=%.2fus TotalTime=%.2fs",
-                        m_name,
-                        m_totalBatches,
-                        m_totalBytes,
-                        m_totalTimeUs / m_totalBatches, // 平均每批 copy 时间
-                        duration / 1e6)));              // 总运行时间（秒）
+            elog(LOG,
+                "[StreamMonitor] Producer=%s "
+                "TID=%d CPU=%d NUMA=%d "
+                "Batches=%lu Bytes=%lu "
+                "AvgSendTime=%.2fus TotalTime=%.2fs",
+                m_name,
+                tid,
+                cpu,
+                node,
+                m_totalBatches,
+                m_totalBytes,
+                m_totalTimeUs / m_totalBatches,
+                duration / 1e6);
         }
     }
+
 
 private:
     char m_name[NAMEDATALEN];  // producer 名称或标识符

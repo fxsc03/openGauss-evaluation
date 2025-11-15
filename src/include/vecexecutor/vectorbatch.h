@@ -345,6 +345,8 @@ struct SysColContainer : public BaseObject {
 //
 class VectorBatch : public BaseObject {
 public:
+    int producer_cpu=0;    // 生产端 CPU
+    int producer_numa=0;   // 生产端 NUMA
     // number of rows in the batch.
     //
     int m_rows;
