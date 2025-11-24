@@ -274,22 +274,61 @@ public:
         // elog(LOG, "Initialized thread cache profiler for TID: %d", m_tid);
     }
 
+    // void start(int parent_id) {
+    //     if (m_is_running) {
+    //         return; // 防止重复start
+    //     }
+    //     m_parent_id = parent_id;
+    //     if (fd_cache_ref > 0) {
+    //         ioctl(fd_cache_ref, PERF_EVENT_IOC_RESET, 0);
+    //         ioctl(fd_cache_ref, PERF_EVENT_IOC_ENABLE, 0);
+    //     }
+    //     if (fd_cache_miss > 0) {
+    //         ioctl(fd_cache_miss, PERF_EVENT_IOC_RESET, 0);
+    //         ioctl(fd_cache_miss, PERF_EVENT_IOC_ENABLE, 0);
+    //     }
+    //     m_is_running = true;
+    // }
     void start(int parent_id) {
         if (m_is_running) {
-            return; // 防止重复start
+            return;
         }
+        
         m_parent_id = parent_id;
-        if (fd_cache_ref > 0) {
-            ioctl(fd_cache_ref, PERF_EVENT_IOC_RESET, 0);
-            ioctl(fd_cache_ref, PERF_EVENT_IOC_ENABLE, 0);
+        
+        // 严谨的fd检查
+        if (fd_cache_ref >= 0) {  // 改为 >= 0
+            if (ioctl(fd_cache_ref, PERF_EVENT_IOC_RESET, 0) == -1) {
+                perror("PERF_EVENT_IOC_RESET failed for cache_ref");
+                // 处理错误，可能直接返回或标记失败
+                return;
+            }
+            if (ioctl(fd_cache_ref, PERF_EVENT_IOC_ENABLE, 0) == -1) {
+                perror("PERF_EVENT_IOC_ENABLE failed for cache_ref");
+                return;
+            }
         }
-        if (fd_cache_miss > 0) {
-            ioctl(fd_cache_miss, PERF_EVENT_IOC_RESET, 0);
-            ioctl(fd_cache_miss, PERF_EVENT_IOC_ENABLE, 0);
+        
+        if (fd_cache_miss >= 0) {  // 改为 >= 0
+            if (ioctl(fd_cache_miss, PERF_EVENT_IOC_RESET, 0) == -1) {
+                perror("PERF_EVENT_IOC_RESET failed for cache_miss");
+                // 需要回滚：禁用已经enable的fd
+                if (fd_cache_ref >= 0) {
+                    ioctl(fd_cache_ref, PERF_EVENT_IOC_DISABLE, 0);
+                }
+                return;
+            }
+            if (ioctl(fd_cache_miss, PERF_EVENT_IOC_ENABLE, 0) == -1) {
+                perror("PERF_EVENT_IOC_ENABLE failed for cache_miss");
+                // 回滚
+                if (fd_cache_ref >= 0) ioctl(fd_cache_ref, PERF_EVENT_IOC_DISABLE, 0);
+                if (fd_cache_miss >= 0) ioctl(fd_cache_miss, PERF_EVENT_IOC_DISABLE, 0);
+                return;
+            }
         }
+        
         m_is_running = true;
     }
-
     void stop() {
         if (!m_is_running) {
             return;

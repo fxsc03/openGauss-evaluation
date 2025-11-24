@@ -102,7 +102,7 @@ public:
      */
     ~StreamSendMonitor()
     {
-        PrintStat();
+        //PrintStat();
     }
 
     /*
@@ -172,6 +172,45 @@ public:
                 duration / 1e6);
         }
     }
+    void PrintStat1()
+    {
+        // 调试输出（可见即可）
+        elog(DEBUG1, "PrintStat called: batches=%lu bytes=%lu",
+            m_totalBatches, m_totalBytes);
+
+        // 获取线程 ID（真正的 TID）
+        pid_t tid = syscall(SYS_gettid);
+
+        // 获取当前 CPU ID
+        int cpu = sched_getcpu();
+
+        // 直接根据 CPU 推算 NUMA node
+        int node = cpu_to_numa_node(cpu);
+
+        // 计算时间
+        struct timeval endTime;
+        gettimeofday(&endTime, NULL);
+
+        double duration = (endTime.tv_sec - m_startTime.tv_sec) * 1e6 +
+                      (endTime.tv_usec - m_startTime.tv_usec);
+
+        // 正常输出统计
+        if (m_totalBatches > 0) {
+            elog(LOG,
+                "[StreamMonitor] Receiver=%s "
+                "TID=%d CPU=%d NUMA=%d "
+                "Batches=%lu Bytes=%lu "
+                "AvgSendTime=%.2fus TotalTime=%.2fs",
+                m_name,
+                tid,
+                cpu,
+                node,
+                m_totalBatches,
+                m_totalBytes,
+                m_totalTimeUs / m_totalBatches,
+                duration / 1e6);
+        }
+    }
 
 
 private:
@@ -186,6 +225,7 @@ private:
 class StreamProducer : public StreamObj {
 public:
     StreamSendMonitor* m_sendMonitor;
+    StreamSendMonitor* m_recvMonitor;
 
     StreamProducer(StreamKey key, PlannedStmt* pstmt, Stream* streamNode, MemoryContext context, int socketNum,
         StreamTransType type);

@@ -347,6 +347,8 @@ class VectorBatch : public BaseObject {
 public:
     int producer_cpu=0;    // 生产端 CPU
     int producer_numa=0;   // 生产端 NUMA
+    int producer_tid=0;    // 生产端线程
+    int *producer_col_numa = NULL; /* 按需分配，长度为 m_cols */
     // number of rows in the batch.
     //
     int m_rows;
