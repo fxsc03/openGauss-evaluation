@@ -89,6 +89,14 @@ public:
         m_totalBatches = 0;
         m_totalBytes = 0;
         m_totalTimeUs = 0.0;
+        
+
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 4; j++) {
+                m_numa_map_byte[i][j] = 0;
+                m_numa_map_batch[i][j] = 0;
+            }
+        }
 
         // 记录开始时间（用于计算总持续时间）
         gettimeofday(&m_startTime, NULL);
@@ -180,6 +188,9 @@ private:
     uint64 m_totalBytes;       // 累积发送字节数
     double m_totalTimeUs;      // 累积发送耗时（微秒）
     struct timeval m_startTime; // 起始时间（构造时记录）
+
+    uint64 m_numa_map_byte[4][4]; // 记录消费者和生产者的NUMA信息对应的发送字节数
+    uint64 m_numa_map_batch[4][4]; // 记录消费者和生产者的NUMA信息对应的批次数
 };
 
 

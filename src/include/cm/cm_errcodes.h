@@ -1,0 +1,1 @@
+/home/fxs/openGauss-server/src/lib/cm_common/cm_errcodes.h

@@ -147,6 +147,7 @@ int StreamMain()
         execute_stream_plan(u_sess->stream_cxt.producer_obj);
         // elog(LOG,"nodeid %d",u_sess->stream_cxt.producer_obj->m_streamNode->scan.plan.plan_node_id);
         // u_sess->stream_cxt.trace_cache_obj->print_average_stats();
+        // 在stream线程结束时打印消费者和生产者的CPU和NUMA信息
         u_sess->stream_cxt.producer_obj->m_sendMonitor->PrintStat();
         execute_stream_end(u_sess->stream_cxt.producer_obj);
         WLMReleaseNodeFromHash();

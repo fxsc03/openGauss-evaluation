@@ -284,6 +284,9 @@ void gs_memory_send(
                     (copy_end.tv_usec - copy_start.tv_usec);
     size_t bytes = batchsrc->m_rows * batchsrc->m_cols * sizeof(ScalarValue);
 
+// 在这里添加stream算子的相关信息
+
+
     if (u_sess->stream_cxt.producer_obj &&
     u_sess->stream_cxt.producer_obj->m_sendMonitor) {
     u_sess->stream_cxt.producer_obj->m_sendMonitor->AddSendStat(bytes, elapsed);
@@ -356,20 +359,32 @@ bool gs_consume_memory_data(StreamState* node, int loc)
         batchdst->Copy<true, false>(batchsrc);
 
         // 获取目标 CPU/NUMA
+        // 消费者
         int dst_cpu  = sched_getcpu();
         int dst_numa = cpu_to_numa_node(dst_cpu);
 
         // 获取生产端 CPU/NUMA
+        // 生产者
         int src_cpu  = batchsrc->producer_cpu;
         int src_numa = batchsrc->producer_numa;   
 
-        elog(LOG,
-            "[BatchPath] smp=%d loc=%d "
-            "src={cpu=%d numa=%d} -> dst={cpu=%d numa=%d} rows=%d",
-            u_sess->stream_cxt.smp_id, loc,
-            src_cpu, src_numa,
-            dst_cpu, dst_numa,
-            batchsrc->m_rows);
+        // 在这里获取消费者和生产者的CPU和NUMA信息
+        /*
+        可以把他们放到stream线程里，NUMA对NUMA这样，在析构函数里输出
+        */
+
+        // elog(LOG,
+        //     "[BatchPath] smp=%d loc=%d "
+        //     "src={cpu=%d numa=%d} -> dst={cpu=%d numa=%d} rows=%d",
+        //     u_sess->stream_cxt.smp_id, loc,
+        //     src_cpu, src_numa,
+        //     dst_cpu, dst_numa,
+        //     batchsrc->m_rows);
+
+
+
+
+                
 
         batchsrc->Reset();
     } else {

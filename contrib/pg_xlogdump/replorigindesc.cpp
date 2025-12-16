@@ -1,0 +1,1 @@
+/home/fxs/openGauss-server/./src/gausskernel/storage/access/rmgrdesc/replorigindesc.cpp
