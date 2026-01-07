@@ -21,6 +21,7 @@
  *
  * -------------------------------------------------------------------------
  */
+#include <time.h>
 #include "postgres.h"
 
 #include "access/gtm.h"
@@ -117,7 +118,7 @@ int StreamMain()
     CodeGenThreadInitialize();
 #endif
     (void)MemoryContextSwitchTo(oldMemory);
-    
+
     /* We can now handle ereport(ERROR) */
     t_thrd.log_cxt.PG_exception_stack = &local_sigjmp_buf;
 
@@ -142,12 +143,154 @@ int StreamMain()
 
         /* Wait thread ID ready */
         u_sess->stream_cxt.producer_obj->waitThreadIdReady();
-        u_sess->stream_cxt.trace_cache_obj = new ThreadPerfCacheProfiler();
+        // u_sess->stream_cxt.trace_cache_obj = new ThreadPerfCacheProfiler();
         //u_sess->stream_cxt.trace_tsc_obj = new ThreadTSCProfiler();
-        execute_stream_plan(u_sess->stream_cxt.producer_obj);
-        if (u_sess->stream_cxt.trace_cache_obj != NULL) {
-            u_sess->stream_cxt.trace_cache_obj->print_average_stats();
+        //     int planNodeId =
+        // u_sess->stream_cxt.producer_obj
+        //     ->m_streamNode
+        //     ->scan.plan.plan_node_id;
+        // int key = planNodeId + 1;
+        // if (key == 4 || key == 6) {
+        //     cpu_set_t cpuset;
+        //     CPU_ZERO(&cpuset);
+
+        //     if (key == 4) {
+        //         /* NUMA node0 + node1
+        //         * CPU 0–47, 96–143
+        //         */
+        //         for (int i = 0; i <= 47; i++)
+        //             CPU_SET(i, &cpuset);
+        //         for (int i = 96; i <= 143; i++)
+        //             CPU_SET(i, &cpuset);
+
+        //         elog(LOG, "[NUMA-BIND] plan_node_id+1=4 -> bind node0+1");
+        //     } else {
+        //         /* NUMA node2 + node3
+        //         * CPU 48–95, 144–191
+        //         */
+        //         for (int i = 48; i <= 95; i++)
+        //             CPU_SET(i, &cpuset);
+        //         for (int i = 144; i <= 191; i++)
+        //             CPU_SET(i, &cpuset);
+
+        //         elog(LOG, "[NUMA-BIND] plan_node_id+1=6 -> bind node2+3");
+        //     }
+
+        //     sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+        // }
+    //     int planNodeId =
+    // u_sess->stream_cxt.producer_obj
+    //     ->m_streamNode
+    //     ->scan.plan.plan_node_id;
+
+    //     cpu_set_t cpuset;
+    //     CPU_ZERO(&cpuset);
+
+    //     if (planNodeId == 9) {
+    //         /* node0 + node1 */
+    //         for (int i = 0; i <= 47; i++) CPU_SET(i, &cpuset);
+    //         for (int i = 96; i <= 143; i++) CPU_SET(i, &cpuset);
+    //     } else if (planNodeId == 11) {
+    //         /* node2 + node3 */
+    //         for (int i = 48; i <= 95; i++) CPU_SET(i, &cpuset);
+    //         for (int i = 144; i <= 191; i++) CPU_SET(i, &cpuset);
+    //     }
+
+    //     sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+    int planNodeId =
+        u_sess->stream_cxt.producer_obj
+            ->m_streamNode
+            ->scan.plan.plan_node_id;
+
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+
+    /*
+    * SQL5 NUMA binding
+    */
+    if (planNodeId == 9) {
+        /*
+        * CStore Scan (lineitem)
+        * Spread on all NUMA nodes
+        */
+        for (int i = 0; i <= 191; i++)
+            CPU_SET(i, &cpuset);
+    }
+    else if (planNodeId == 8 || planNodeId == 7) {
+        /*
+        * Large Hash Join
+        * Bind to NUMA node2 + node3
+        */
+        for (int i = 48; i <= 71; i++)
+            CPU_SET(i, &cpuset);
+        for (int i = 144; i <= 167; i++)
+            CPU_SET(i, &cpuset);
+
+        for (int i = 72; i <= 95; i++)
+            CPU_SET(i, &cpuset);
+        for (int i = 168; i <= 191; i++)
+            CPU_SET(i, &cpuset);
+    }
+    else if (planNodeId == 5) {
+        /*
+        * LOCAL REDISTRIBUTE
+        * producer / consumer split by smp_id
+        */
+        if (u_sess->stream_cxt.smp_id < 64) {
+            /* producer → node0 + node1 */
+            for (int i = 0; i <= 47; i++)
+                CPU_SET(i, &cpuset);
+            for (int i = 96; i <= 143; i++)
+                CPU_SET(i, &cpuset);
+        } else {
+            /* consumer → node2 + node3 */
+            for (int i = 48; i <= 95; i++)
+                CPU_SET(i, &cpuset);
+            for (int i = 144; i <= 191; i++)
+                CPU_SET(i, &cpuset);
         }
+    }
+    else if (planNodeId == 6 || planNodeId == 4 || planNodeId == 3) {
+        /*
+        * Hash Aggregate + LOCAL GATHER
+        * Single NUMA node (node3)
+        */
+        for (int i = 72; i <= 95; i++)
+            CPU_SET(i, &cpuset);
+        for (int i = 168; i <= 191; i++)
+            CPU_SET(i, &cpuset);
+    }
+    else {
+        /*
+        * default: no binding
+        */
+        for (int i = 0; i <= 191; i++)
+            CPU_SET(i, &cpuset);
+    }
+
+    (void)sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+        struct timespec stream_start_ts;
+        struct timespec stream_end_ts;
+        clock_gettime(CLOCK_MONOTONIC, &stream_start_ts);
+        execute_stream_plan(u_sess->stream_cxt.producer_obj);
+        clock_gettime(CLOCK_MONOTONIC, &stream_end_ts);
+
+        uint64 elapsed_ns =
+            (stream_end_ts.tv_sec - stream_start_ts.tv_sec) * 1000000000UL +
+            (stream_end_ts.tv_nsec - stream_start_ts.tv_nsec);
+
+        elog(LOG,
+            "[STREAM-TIME] smp_id=%u plan_node_id=%d elapsed=%.3f ms",
+            u_sess->stream_cxt.smp_id,
+            u_sess->stream_cxt.producer_obj
+                ? u_sess->stream_cxt.producer_obj
+                    ->m_streamNode
+                    ->scan.plan.plan_node_id
+                : -1,
+            elapsed_ns / 1e6);
+        // if (u_sess->stream_cxt.trace_cache_obj != NULL) {
+        //     u_sess->stream_cxt.trace_cache_obj->print_average_stats();
+        // }
         // elog(LOG,"nodeid %d",u_sess->stream_cxt.producer_obj->m_streamNode->scan.plan.plan_node_id);
         // u_sess->stream_cxt.trace_cache_obj->print_average_stats();
         // u_sess->stream_cxt.producer_obj->m_sendMonitor->PrintStat();

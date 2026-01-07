@@ -1,0 +1,286 @@
+From a484d785f07711306f9e3611ba7b79c15ad558f4 Mon Sep 17 00:00:00 2001
+From: songsihui <song.sihui@foxmail.com>
+Date: Fri, 14 Nov 2025 15:45:34 +0800
+Subject: [PATCH 2/4] =?UTF-8?q?=E5=8F=96=E6=B6=88=E6=B3=A8=E9=87=8A?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../communication/libcomm_utils/libcomm_memory.cpp |  22 +--
+ src/gausskernel/process/stream/streamProducer.cpp  |  10 +-
+ src/include/distributelayer/streamProducer.h       | 186 +++++++++++----------
+ 3 files changed, 110 insertions(+), 108 deletions(-)
+
+diff --git a/src/gausskernel/cbb/communication/libcomm_utils/libcomm_memory.cpp b/src/gausskernel/cbb/communication/libcomm_utils/libcomm_memory.cpp
+index 197e1ba..133ab64 100755
+--- a/src/gausskernel/cbb/communication/libcomm_utils/libcomm_memory.cpp
++++ b/src/gausskernel/cbb/communication/libcomm_utils/libcomm_memory.cpp
+@@ -237,8 +237,8 @@ void gs_memory_send(
+     // gettimeofday(&copy_start, NULL);
+     StreamTimeCopyStart(t_thrd.pgxc_cxt.GlobalNetInstr);
+     // u_sess->stream_cxt.trace_cache_obj->start(u_sess->stream_cxt.producer_obj->m_streamNode->scan.plan.plan_node_id);
+-    // struct timeval copy_start, copy_end;
+-    // gettimeofday(&copy_start, NULL);
++    struct timeval copy_start, copy_end;
++    gettimeofday(&copy_start, NULL);
+     /* Copy data to shared context. */
+     if (sharedContext->vectorized) {
+         Assert(sharedContext->sharedBatches != NULL);
+@@ -269,15 +269,15 @@ void gs_memory_send(
+             ready_to_send = true;
+         }
+     }
+-    // gettimeofday(&copy_end, NULL);
+-    // double elapsed = (copy_end.tv_sec - copy_start.tv_sec) * 1e6 +
+-    //                 (copy_end.tv_usec - copy_start.tv_usec);
+-    // size_t bytes = batchsrc->m_rows * batchsrc->m_cols * sizeof(ScalarValue);
+-
+-    // if (u_sess->stream_cxt.producer_obj &&
+-    // u_sess->stream_cxt.producer_obj->m_sendMonitor) {
+-    // u_sess->stream_cxt.producer_obj->m_sendMonitor->AddSendStat(bytes, elapsed);
+-    // }
++    gettimeofday(&copy_end, NULL);
++    double elapsed = (copy_end.tv_sec - copy_start.tv_sec) * 1e6 +
++                    (copy_end.tv_usec - copy_start.tv_usec);
++    size_t bytes = batchsrc->m_rows * batchsrc->m_cols * sizeof(ScalarValue);
++
++    if (u_sess->stream_cxt.producer_obj &&
++    u_sess->stream_cxt.producer_obj->m_sendMonitor) {
++    u_sess->stream_cxt.producer_obj->m_sendMonitor->AddSendStat(bytes, elapsed);
++    }
+     // u_sess->stream_cxt.trace_cache_obj->stop();
+     StreamTimeCopyEnd(t_thrd.pgxc_cxt.GlobalNetInstr);
+     //每个batch都要先加锁，确保对信号量状态的修改和线程等待计数的操作是原子安全的。if (waiting_count > 0) { LIBCOMM_PTHREAD_COND_SIGNAL(&cond); }：如果有线程正在等待该信号量（waiting_count 记录等待线程数），则通过条件变量 cond 唤醒其中一个等待线程，让它可以继续执行（获取信号量）。最后解锁，允许其他线程操作信号量。
+diff --git a/src/gausskernel/process/stream/streamProducer.cpp b/src/gausskernel/process/stream/streamProducer.cpp
+index 0a26f6f..791e2dc 100755
+--- a/src/gausskernel/process/stream/streamProducer.cpp
++++ b/src/gausskernel/process/stream/streamProducer.cpp
+@@ -168,7 +168,7 @@ StreamProducer::StreamProducer(
+     rc = memcpy_s(m_plan, sizeof(PlannedStmt), pstmt, sizeof(PlannedStmt));
+     securec_check(rc, "\0", "\0");
+ 
+-    //m_sendMonitor = new StreamSendMonitor("StreamProducer");
++    m_sendMonitor = new StreamSendMonitor("StreamProducer");
+ }
+ 
+ StreamProducer::~StreamProducer()
+@@ -195,10 +195,10 @@ StreamProducer::~StreamProducer()
+     m_distributeIdx = NULL;
+     m_skewState = NULL;
+     
+-    // if (m_sendMonitor) {
+-    //     delete m_sendMonitor;
+-    //     m_sendMonitor = NULL;
+-    // }
++    if (m_sendMonitor) {
++        delete m_sendMonitor;
++        m_sendMonitor = NULL;
++    }
+ }
+ 
+ /*
+diff --git a/src/include/distributelayer/streamProducer.h b/src/include/distributelayer/streamProducer.h
+index 7747759..65513f4 100644
+--- a/src/include/distributelayer/streamProducer.h
++++ b/src/include/distributelayer/streamProducer.h
+@@ -47,102 +47,104 @@
+  *
+  * 在析构时（或手动调用 PrintStat）自动打印统计结果。
+  */
+-// class StreamSendMonitor {
+-// public:
+-//     /*
+-//      * 构造函数
+-//      *  @param name : 当前 producer 的名称或标识符
+-//      *
+-//      * 初始化统计变量，并记录启动时间。
+-//      */
+-//     StreamSendMonitor(const char* name)
+-//     {
+-//         // 安全拷贝 producer 名称（最多 NAMEDATALEN-1 字节）
+-//         errno_t rc = strncpy_s(m_name, NAMEDATALEN, name, NAMEDATALEN - 1);
+-//         securec_check(rc, "\0", "\0");
+-
+-//         // 初始化统计变量
+-//         m_totalBatches = 0;
+-//         m_totalBytes = 0;
+-//         m_totalTimeUs = 0.0;
+-
+-//         // 记录开始时间（用于计算总持续时间）
+-//         gettimeofday(&m_startTime, NULL);
+-//     }
+-
+-//     /*
+-//      * 析构函数
+-//      *
+-//      * 在对象销毁时自动打印统计结果，
+-//      * 通常发生在 StreamProducer 结束（deInit 或析构）时。
+-//      */
+-//     ~StreamSendMonitor()
+-//     {
+-//         PrintStat();
+-//     }
+-
+-//     /*
+-//      * AddSendStat
+-//      * ------------
+-//      * 由 gs_memory_send() 调用，用于累积每次发送的数据统计。
+-//      *
+-//      * @param bytes   : 本次发送的数据字节数
+-//      * @param time_us : 本次发送耗时（微秒）
+-//      */
+-//     void AddSendStat(size_t bytes, double time_us)
+-//     {
+-//         m_totalBatches++;      // 累加 batch 数
+-//         m_totalBytes += bytes; // 累加字节数
+-//         m_totalTimeUs += time_us; // 累加耗时
+-//     }
+-
+-//     /*
+-//      * PrintStat
+-//      * ----------
+-//      * 打印当前监控结果到日志（LOG 级别）。
+-//      *
+-//      * 内容包括：
+-//      *   - Producer 名称
+-//      *   - 总批次数
+-//      *   - 总字节数
+-//      *   - 平均单批 copy 耗时（us）
+-//      *   - Producer 存活总时长（秒）
+-//      */
+-//     void PrintStat()
+-//     {
+-//         struct timeval endTime;
+-//         gettimeofday(&endTime, NULL);
+-
+-//         // 计算监控持续时间（微秒）
+-//         double duration = (endTime.tv_sec - m_startTime.tv_sec) * 1e6 +
+-//                           (endTime.tv_usec - m_startTime.tv_usec);
+-
+-//         if (m_totalBatches > 0) {
+-//             ereport(LOG,
+-//                 (errmodule(MOD_STREAM),
+-//                  errmsg("[StreamMonitor] Producer=%s "
+-//                         "Batches=%lu Bytes=%lu "
+-//                         "AvgSendTime=%.2fus TotalTime=%.2fs",
+-//                         m_name,
+-//                         m_totalBatches,
+-//                         m_totalBytes,
+-//                         m_totalTimeUs / m_totalBatches, // 平均每批 copy 时间
+-//                         duration / 1e6)));              // 总运行时间（秒）
+-//         }
+-//     }
+-
+-// private:
+-//     char m_name[NAMEDATALEN];  // producer 名称或标识符
+-//     uint64 m_totalBatches;     // 累积 batch 数
+-//     uint64 m_totalBytes;       // 累积发送字节数
+-//     double m_totalTimeUs;      // 累积发送耗时（微秒）
+-//     struct timeval m_startTime; // 起始时间（构造时记录）
+-// };
++class StreamSendMonitor {
++public:
++    /*
++     * 构造函数
++     *  @param name : 当前 producer 的名称或标识符
++     *
++     * 初始化统计变量，并记录启动时间。
++     */
++    StreamSendMonitor(const char* name)
++    {
++        // 安全拷贝 producer 名称（最多 NAMEDATALEN-1 字节）
++        errno_t rc = strncpy_s(m_name, NAMEDATALEN, name, NAMEDATALEN - 1);
++        securec_check(rc, "\0", "\0");
++
++        // 初始化统计变量
++        m_totalBatches = 0;
++        m_totalBytes = 0;
++        m_totalTimeUs = 0.0;
++
++        // 记录开始时间（用于计算总持续时间）
++        gettimeofday(&m_startTime, NULL);
++    }
++
++    /*
++     * 析构函数
++     *
++     * 在对象销毁时自动打印统计结果，
++     * 通常发生在 StreamProducer 结束（deInit 或析构）时。
++     */
++    ~StreamSendMonitor()
++    {
++        PrintStat();
++    }
++
++    /*
++     * AddSendStat
++     * ------------
++     * 由 gs_memory_send() 调用，用于累积每次发送的数据统计。
++     *
++     * @param bytes   : 本次发送的数据字节数
++     * @param time_us : 本次发送耗时（微秒）
++     */
++    void AddSendStat(size_t bytes, double time_us)
++    {
++        m_totalBatches++;      // 累加 batch 数
++        m_totalBytes += bytes; // 累加字节数
++        m_totalTimeUs += time_us; // 累加耗时
++    }
++
++    /*
++     * PrintStat
++     * ----------
++     * 打印当前监控结果到日志（LOG 级别）。
++     *
++     * 内容包括：
++     *   - Producer 名称
++     *   - 总批次数
++     *   - 总字节数
++     *   - 平均单批 copy 耗时（us）
++     *   - Producer 存活总时长（秒）
++     */
++    void PrintStat()
++    {
++        printf("printStat");
++        ereport(DEBUG1, (errmsg("PrintStat called: batches=%lu bytes=%lu", m_totalBatches, m_totalBytes)));
++        struct timeval endTime;
++        gettimeofday(&endTime, NULL);
++
++        // 计算监控持续时间（微秒）
++        double duration = (endTime.tv_sec - m_startTime.tv_sec) * 1e6 +
++                          (endTime.tv_usec - m_startTime.tv_usec);
++
++        if (m_totalBatches > 0) {
++            ereport(LOG,
++                (errmodule(MOD_STREAM),
++                 errmsg("[StreamMonitor] Producer=%s "
++                        "Batches=%lu Bytes=%lu "
++                        "AvgSendTime=%.2fus TotalTime=%.2fs",
++                        m_name,
++                        m_totalBatches,
++                        m_totalBytes,
++                        m_totalTimeUs / m_totalBatches, // 平均每批 copy 时间
++                        duration / 1e6)));              // 总运行时间（秒）
++        }
++    }
++
++private:
++    char m_name[NAMEDATALEN];  // producer 名称或标识符
++    uint64 m_totalBatches;     // 累积 batch 数
++    uint64 m_totalBytes;       // 累积发送字节数
++    double m_totalTimeUs;      // 累积发送耗时（微秒）
++    struct timeval m_startTime; // 起始时间（构造时记录）
++};
+ 
+ 
+ class StreamProducer : public StreamObj {
+ public:
+-    // StreamSendMonitor* m_sendMonitor;
++    StreamSendMonitor* m_sendMonitor;
+ 
+     StreamProducer(StreamKey key, PlannedStmt* pstmt, Stream* streamNode, MemoryContext context, int socketNum,
+         StreamTransType type);
+-- 
+1.8.3.1
+

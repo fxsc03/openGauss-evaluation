@@ -850,20 +850,20 @@ void HashAggRunner::buildAggTbl(VectorBatch* batch)
     }
 
     m_hashbuild_time += elapsed_time(&start_time);
-    auto build_end = std::chrono::high_resolution_clock::now();
-                auto build_duration = std::chrono::duration_cast<std::chrono::microseconds>(build_end - build_start);
-                double build_time_ms = build_duration.count() / 1000.0;
-                printf("Batchbuild time %.3fms\n",build_time_ms);
+    // auto build_end = std::chrono::high_resolution_clock::now();
+    //             auto build_duration = std::chrono::duration_cast<std::chrono::microseconds>(build_end - build_start);
+    //             double build_time_ms = build_duration.count() / 1000.0;
+    //             printf("Batchbuild time %.3fms\n",build_time_ms);
     INSTR_TIME_SET_CURRENT(start_time);
     if (m_runtime->jitted_batchagg)
         ((vecbatchagg_func)(m_runtime->jitted_batchagg))(this, m_Loc, batch, m_aggIdx);
     else
         BatchAggregation(batch);
     m_hashagg_time += elapsed_time(&start_time);
-    auto agg_end = std::chrono::high_resolution_clock::now();
-                auto agg_duration = std::chrono::duration_cast<std::chrono::microseconds>(agg_end - build_end);
-                double agg_time_ms = agg_duration.count() / 1000.0;
-                printf("BatchAggregation time %.3fms\n",agg_time_ms);
+    // auto agg_end = std::chrono::high_resolution_clock::now();
+    //             auto agg_duration = std::chrono::duration_cast<std::chrono::microseconds>(agg_end - build_end);
+    //             double agg_time_ms = agg_duration.count() / 1000.0;
+    //             printf("BatchAggregation time %.3fms\n",agg_time_ms);
     /* we can reset the memory safely per batch line*/
     if (m_spillToDisk)
         MemoryContextReset(m_filesource->m_context);

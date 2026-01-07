@@ -1052,7 +1052,9 @@ VectorBatch* SonicHashAgg::Run()
 void SonicHashAgg::Build()
 {
     VectorBatch* outer_batch = NULL;
-
+    // if (u_sess->stream_cxt.trace_cache_obj != NULL) {
+    //     u_sess->stream_cxt.trace_cache_obj->start(m_runtime->ss.ps.plan->plan_node_id);
+    // }
     /* load data, build hash table & calculate agg function */
     WaitState oldStatus = pgstat_report_waitstatus(STATE_EXEC_HASHAGG_BUILD_HASH);
     for (;;) {
@@ -1110,8 +1112,9 @@ void SonicHashAgg::Build()
     //         m_hashbuild_time,
     //         m_calcagg_time
     //         );
-    //elog(LOG,"-----------VecSonicHashAgg(%d)-----------", m_runtime->ss.ps.plan->plan_node_id);
-    //u_sess->stream_cxt.trace_tsc_obj->print_stats();
+    // if (u_sess->stream_cxt.trace_cache_obj != NULL) {
+    //     u_sess->stream_cxt.trace_cache_obj->stop();
+    // }
 }
 
 /*
@@ -1481,7 +1484,7 @@ void SonicHashAgg::buildAggTblBatch(VectorBatch* batch)
     // static size_t total_hot_bucket_accesses{0};
     // INSTR_TIME_SET_CURRENT(cache_test_start);
     // std::set<uint32_t> group_positions;
-    // u_sess->stream_cxt.trace_cache_obj->start();
+
     INSTR_TIME_SET_CURRENT(start_time);
 
 
@@ -1697,7 +1700,9 @@ void SonicHashAgg::buildAggTblBatch(VectorBatch* batch)
         // ==============================================================
     }
     m_calcagg_time += elapsed_time(&start_time);
-    
+    // if (u_sess->stream_cxt.trace_cache_obj != NULL) {
+    //     u_sess->stream_cxt.trace_cache_obj->stop();
+    // }
     // if(m_runtime->ss.ps.plan->plan_node_id == 6){
             // elog(LOG,
             // "[CPU %d VecSonicHashAgg(%d)] smp %d: groups %d Hash table size is %.4f MB, m_rows :%ld.",
@@ -1957,208 +1962,208 @@ void SonicHashAgg::buildAggTblBatch(VectorBatch* batch)
 //     return extra_size_needed;
 // }
 
-class HashTableSizeStats {
-public:
-    struct SizeStats {
-        size_t total_hash_table_size = 0;    // 整个哈希表估算的总字节数
-        size_t key_data_size = 0;           // 键（group key）占用的字节数
-        size_t agg_data_size = 0;           // 聚合列占用的字节数
-        size_t hash_metadata_size = 0;      // 哈希相关元数据（hash值、next 指针、位置映射）字节数
-        size_t bucket_array_size = 0;       // 桶数组（bucket array）占用字节数（固定，只计算一次）
-        size_t estimated_cache_lines = 0;   // 按 64B cache line 估算的 cache line 数量
-        uint64_t total_inserts = 0;         // 累计插入的行数
-        struct timespec last_report_time;   // 上次报告时间戳，用于计算时间差或速率
-        uint64_t total_aggregations = 0;  // 当前线程累计聚合次数
-    };
+// class HashTableSizeStats {
+// public:
+//     struct SizeStats {
+//         size_t total_hash_table_size = 0;    // 整个哈希表估算的总字节数
+//         size_t key_data_size = 0;           // 键（group key）占用的字节数
+//         size_t agg_data_size = 0;           // 聚合列占用的字节数
+//         size_t hash_metadata_size = 0;      // 哈希相关元数据（hash值、next 指针、位置映射）字节数
+//         size_t bucket_array_size = 0;       // 桶数组（bucket array）占用字节数（固定，只计算一次）
+//         size_t estimated_cache_lines = 0;   // 按 64B cache line 估算的 cache line 数量
+//         uint64_t total_inserts = 0;         // 累计插入的行数
+//         struct timespec last_report_time;   // 上次报告时间戳，用于计算时间差或速率
+//         uint64_t total_aggregations = 0;  // 当前线程累计聚合次数
+//     };
     
-    static __thread SizeStats tls_size_stats; // 线程局部的统计结构，每个线程/SM P 有自己的统计
+//     static __thread SizeStats tls_size_stats; // 线程局部的统计结构，每个线程/SM P 有自己的统计
 
-    // 每次插入时调用，用参数更新线程局部的统计
-    static void recordInsertSize(int hash_need, int agg_num, int64 extra_size, 
-                                size_t bucket_size, bool use_seg_hash_tbl, int smp_id,int agg_calls = 0) {
-        // 如果是第一次插入，记录起始时间
-        if (tls_size_stats.total_inserts == 0) {
-            clock_gettime(CLOCK_MONOTONIC, &tls_size_stats.last_report_time);
-        }
+//     // 每次插入时调用，用参数更新线程局部的统计
+//     static void recordInsertSize(int hash_need, int agg_num, int64 extra_size, 
+//                                 size_t bucket_size, bool use_seg_hash_tbl, int smp_id,int agg_calls = 0) {
+//         // 如果是第一次插入，记录起始时间
+//         if (tls_size_stats.total_inserts == 0) {
+//             clock_gettime(CLOCK_MONOTONIC, &tls_size_stats.last_report_time);
+//         }
         
-        // 估算本次插入对行大小的增加（以字节为单位）
-        size_t row_size = 0;
+//         // 估算本次插入对行大小的增加（以字节为单位）
+//         size_t row_size = 0;
         
-        /* ---------- 1. 键数据大小 ---------- */
-        // 假设每个键使用 ScalarValue（通常 8 字节） + flag（1 字节）//typedef uintptr_t ScalarValue;
-        tls_size_stats.key_data_size += hash_need * (sizeof(ScalarValue) + sizeof(uint8));
-        row_size += hash_need * (sizeof(ScalarValue) + sizeof(uint8));
+//         /* ---------- 1. 键数据大小 ---------- */
+//         // 假设每个键使用 ScalarValue（通常 8 字节） + flag（1 字节）//typedef uintptr_t ScalarValue;
+//         tls_size_stats.key_data_size += hash_need * (sizeof(ScalarValue) + sizeof(uint8));
+//         row_size += hash_need * (sizeof(ScalarValue) + sizeof(uint8));
         
-        // 如果有变长数据（extra_size），也加到键数据大小
-        tls_size_stats.key_data_size += extra_size;
-        row_size += extra_size;
+//         // 如果有变长数据（extra_size），也加到键数据大小
+//         tls_size_stats.key_data_size += extra_size;
+//         row_size += extra_size;
         
-        /* ---------- 2. 聚合数据大小 ---------- */
-        // 假设每个聚合列占用一个 uint64（8B）和一个 flag（1B）作为 slot
-        size_t agg_size_per_col = sizeof(uint64) + sizeof(uint8);
-        // 把每个聚合列的空间加到 agg_data_size（中间状态）
-        tls_size_stats.agg_data_size += agg_num * agg_size_per_col;
-        row_size += agg_num * agg_size_per_col;
+//         /* ---------- 2. 聚合数据大小 ---------- */
+//         // 假设每个聚合列占用一个 uint64（8B）和一个 flag（1B）作为 slot
+//         size_t agg_size_per_col = sizeof(uint64) + sizeof(uint8);
+//         // 把每个聚合列的空间加到 agg_data_size（中间状态）
+//         tls_size_stats.agg_data_size += agg_num * agg_size_per_col;
+//         row_size += agg_num * agg_size_per_col;
         
-        // 如果需要 final 状态（例如某些聚合需要额外 slot），再加一次保守估计
-        tls_size_stats.agg_data_size += agg_num * agg_size_per_col;
-        row_size += agg_num * agg_size_per_col;
+//         // 如果需要 final 状态（例如某些聚合需要额外 slot），再加一次保守估计
+//         tls_size_stats.agg_data_size += agg_num * agg_size_per_col;
+//         row_size += agg_num * agg_size_per_col;
         
-        /* ---------- 3. 哈希元数据大小 ---------- */
-        // 存储哈希值（uint32）
-        tls_size_stats.hash_metadata_size += sizeof(uint32);
-        row_size += sizeof(uint32);
+//         /* ---------- 3. 哈希元数据大小 ---------- */
+//         // 存储哈希值（uint32）
+//         tls_size_stats.hash_metadata_size += sizeof(uint32);
+//         row_size += sizeof(uint32);
         
-        // 存储链表的 next 指针（uint32，用于链表冲突处理）
-        tls_size_stats.hash_metadata_size += sizeof(uint32);
-        row_size += sizeof(uint32);
+//         // 存储链表的 next 指针（uint32，用于链表冲突处理）
+//         tls_size_stats.hash_metadata_size += sizeof(uint32);
+//         row_size += sizeof(uint32);
         
-        // 存储位置映射（m_loc 中的行号，uint32）
-        tls_size_stats.hash_metadata_size += sizeof(uint32);
-        row_size += sizeof(uint32);
+//         // 存储位置映射（m_loc 中的行号，uint32）
+//         tls_size_stats.hash_metadata_size += sizeof(uint32);
+//         row_size += sizeof(uint32);
         
-        /* ---------- 4. 哈希桶数组大小 ---------- */
-        // 桶数组通常是固定大小，所以只在第一次插入时统计一次
-        if (tls_size_stats.bucket_array_size == 0) {
-            if (!use_seg_hash_tbl) {
-                // 普通哈希：bucket_size（桶数量） * sizeof(uint32)（每个桶一个 32 位索引）
-                tls_size_stats.bucket_array_size = bucket_size * sizeof(uint32);
-            } else {
-                // 分段哈希表（segmented hash table）也按保守估计计算
-                tls_size_stats.bucket_array_size = bucket_size * sizeof(uint32); // 保守估计
-            }
-        }
+//         /* ---------- 4. 哈希桶数组大小 ---------- */
+//         // 桶数组通常是固定大小，所以只在第一次插入时统计一次
+//         if (tls_size_stats.bucket_array_size == 0) {
+//             if (!use_seg_hash_tbl) {
+//                 // 普通哈希：bucket_size（桶数量） * sizeof(uint32)（每个桶一个 32 位索引）
+//                 tls_size_stats.bucket_array_size = bucket_size * sizeof(uint32);
+//             } else {
+//                 // 分段哈希表（segmented hash table）也按保守估计计算
+//                 tls_size_stats.bucket_array_size = bucket_size * sizeof(uint32); // 保守估计
+//             }
+//         }
         
-        // 更新总大小（各部分相加）
-        tls_size_stats.total_hash_table_size = 
-            tls_size_stats.key_data_size + 
-            tls_size_stats.agg_data_size + 
-            tls_size_stats.hash_metadata_size + 
-            tls_size_stats.bucket_array_size;
+//         // 更新总大小（各部分相加）
+//         tls_size_stats.total_hash_table_size = 
+//             tls_size_stats.key_data_size + 
+//             tls_size_stats.agg_data_size + 
+//             tls_size_stats.hash_metadata_size + 
+//             tls_size_stats.bucket_array_size;
         
-        // 按 64 字节 cache line 估算 cache 行数
-        tls_size_stats.estimated_cache_lines = 
-            (tls_size_stats.total_hash_table_size + 63) / 64;
+//         // 按 64 字节 cache line 估算 cache 行数
+//         tls_size_stats.estimated_cache_lines = 
+//             (tls_size_stats.total_hash_table_size + 63) / 64;
         
-        // 增加插入计数
-        tls_size_stats.total_inserts++;
+//         // 增加插入计数
+//         tls_size_stats.total_inserts++;
 
-        tls_size_stats.total_aggregations += agg_calls;
+//         tls_size_stats.total_aggregations += agg_calls;
         
-        // 每隔 1000 插入打印一次统计报告
-        if (tls_size_stats.total_inserts % 1000 == 0) {
-            reportSizeStats(smp_id, row_size);
-        }
-    }
+//         // 每隔 1000 插入打印一次统计报告
+//         if (tls_size_stats.total_inserts % 1000 == 0) {
+//             reportSizeStats(smp_id, row_size);
+//         }
+//     }
     
-    // 打印并报告当前统计（调用 elog 打印日志）
-    static void reportSizeStats(int smp_id, size_t avg_row_size) {
-        struct timespec current_time;
-        clock_gettime(CLOCK_MONOTONIC, &current_time);
+//     // 打印并报告当前统计（调用 elog 打印日志）
+//     static void reportSizeStats(int smp_id, size_t avg_row_size) {
+//         struct timespec current_time;
+//         clock_gettime(CLOCK_MONOTONIC, &current_time);
         
-        // 计算距离上次报告经过的秒数（尽管当前未直接使用 elapsed_sec）
-        double elapsed_sec = (current_time.tv_sec - tls_size_stats.last_report_time.tv_sec) +
-                           (current_time.tv_nsec - tls_size_stats.last_report_time.tv_nsec) / 1e9;
+//         // 计算距离上次报告经过的秒数（尽管当前未直接使用 elapsed_sec）
+//         double elapsed_sec = (current_time.tv_sec - tls_size_stats.last_report_time.tv_sec) +
+//                            (current_time.tv_nsec - tls_size_stats.last_report_time.tv_nsec) / 1e9;
         
-        // 使用 elog 打印格式化后的统计信息（以 MB 为单位输出大小）
-        elog(LOG, 
-            "[HashTableSize][SMP%d] "
-            "TotalSize: %.2fMB, "
-            "Keys: %.2fMB, Aggs: %.2fMB, Meta: %.2fMB, Buckets: %.2fMB, "
-            "CacheLines: %zu, AvgRow: %.1fB, Inserts: %lu, AggCalls: %lu",
-            smp_id,
-            (double)tls_size_stats.total_hash_table_size / (1024 * 1024),
-            (double)tls_size_stats.key_data_size / (1024 * 1024),
-            (double)tls_size_stats.agg_data_size / (1024 * 1024),
-            (double)tls_size_stats.hash_metadata_size / (1024 * 1024),
-            (double)tls_size_stats.bucket_array_size / (1024 * 1024),
-            tls_size_stats.estimated_cache_lines,
-            (double)avg_row_size,
-            tls_size_stats.total_inserts,
-            tls_size_stats.total_aggregations   // ✅ 新增输出
-        );
+//         // 使用 elog 打印格式化后的统计信息（以 MB 为单位输出大小）
+//         elog(LOG, 
+//             "[HashTableSize][SMP%d] "
+//             "TotalSize: %.2fMB, "
+//             "Keys: %.2fMB, Aggs: %.2fMB, Meta: %.2fMB, Buckets: %.2fMB, "
+//             "CacheLines: %zu, AvgRow: %.1fB, Inserts: %lu, AggCalls: %lu",
+//             smp_id,
+//             (double)tls_size_stats.total_hash_table_size / (1024 * 1024),
+//             (double)tls_size_stats.key_data_size / (1024 * 1024),
+//             (double)tls_size_stats.agg_data_size / (1024 * 1024),
+//             (double)tls_size_stats.hash_metadata_size / (1024 * 1024),
+//             (double)tls_size_stats.bucket_array_size / (1024 * 1024),
+//             tls_size_stats.estimated_cache_lines,
+//             (double)avg_row_size,
+//             tls_size_stats.total_inserts,
+//             tls_size_stats.total_aggregations   // ✅ 新增输出
+//         );
         
-        // 更新上次报告时间戳为当前时间
-        tls_size_stats.last_report_time = current_time;
-    }
+//         // 更新上次报告时间戳为当前时间
+//         tls_size_stats.last_report_time = current_time;
+//     }
     
-    // 返回当前线程局部统计的副本，供外部（CacheHitPredictor）分析使用
-    static SizeStats getCurrentStats(int smp_id) {
-        return tls_size_stats;
-    }
-};
+//     // 返回当前线程局部统计的副本，供外部（CacheHitPredictor）分析使用
+//     static SizeStats getCurrentStats(int smp_id) {
+//         return tls_size_stats;
+//     }
+// };
 
-// 定义静态成员
-thread_local HashTableSizeStats::SizeStats HashTableSizeStats::tls_size_stats;
-class CacheHitPredictor {
-public:
-    // 基于 SizeStats 提供缓存层级的简单命中率预测
-    static void analyzeCacheBehavior(const HashTableSizeStats::SizeStats& stats, int smp_id) {
-        // 使用常见的缓存容量估算（简化模型）
-        /* ---------- L1 Cache 分析 (通常 32-64KB) ---------- */
-        size_t l1_cache_size = 32 * 1024; // 32KB
-        bool fits_in_l1 = stats.total_hash_table_size <= l1_cache_size;
+// // 定义静态成员
+// thread_local HashTableSizeStats::SizeStats HashTableSizeStats::tls_size_stats;
+// class CacheHitPredictor {
+// public:
+//     // 基于 SizeStats 提供缓存层级的简单命中率预测
+//     static void analyzeCacheBehavior(const HashTableSizeStats::SizeStats& stats, int smp_id) {
+//         // 使用常见的缓存容量估算（简化模型）
+//         /* ---------- L1 Cache 分析 (通常 32-64KB) ---------- */
+//         size_t l1_cache_size = 32 * 1024; // 32KB
+//         bool fits_in_l1 = stats.total_hash_table_size <= l1_cache_size;
         
-        /* ---------- L2 Cache 分析 (通常 256-512KB per core) ---------- */
-        size_t l2_cache_size = 256 * 1024; // 256KB
-        bool fits_in_l2 = stats.total_hash_table_size <= l2_cache_size;
+//         /* ---------- L2 Cache 分析 (通常 256-512KB per core) ---------- */
+//         size_t l2_cache_size = 256 * 1024; // 256KB
+//         bool fits_in_l2 = stats.total_hash_table_size <= l2_cache_size;
         
-        /* ---------- L3 Cache 分析 (通常 2-4MB per core) ---------- */
-        size_t l3_cache_size = 2 * 1024 * 1024; // 2MB
-        bool fits_in_l3 = stats.total_hash_table_size <= l3_cache_size;
+//         /* ---------- L3 Cache 分析 (通常 2-4MB per core) ---------- */
+//         size_t l3_cache_size = 2 * 1024 * 1024; // 2MB
+//         bool fits_in_l3 = stats.total_hash_table_size <= l3_cache_size;
         
-        /* ---------- 缓存命中率预测 ---------- */
-        double predicted_hit_rate = 0.0;
-        const char* cache_level = "";
+//         /* ---------- 缓存命中率预测 ---------- */
+//         double predicted_hit_rate = 0.0;
+//         const char* cache_level = "";
         
-        // 根据整表是否能放入某一级缓存，设定一个经验命中率基线
-        if (fits_in_l1) {
-            predicted_hit_rate = 0.95; // 95% 命中率
-            cache_level = "L1";
-        } else if (fits_in_l2) {
-            predicted_hit_rate = 0.85; // 85% 命中率
-            cache_level = "L2";
-        } else if (fits_in_l3) {
-            predicted_hit_rate = 0.70; // 70% 命中率
-            cache_level = "L3";
-        } else {
-            predicted_hit_rate = 0.30; // 30% 命中率，主要回落到主内存访问
-            cache_level = "MainMemory";
-        }
+//         // 根据整表是否能放入某一级缓存，设定一个经验命中率基线
+//         if (fits_in_l1) {
+//             predicted_hit_rate = 0.95; // 95% 命中率
+//             cache_level = "L1";
+//         } else if (fits_in_l2) {
+//             predicted_hit_rate = 0.85; // 85% 命中率
+//             cache_level = "L2";
+//         } else if (fits_in_l3) {
+//             predicted_hit_rate = 0.70; // 70% 命中率
+//             cache_level = "L3";
+//         } else {
+//             predicted_hit_rate = 0.30; // 30% 命中率，主要回落到主内存访问
+//             cache_level = "MainMemory";
+//         }
         
-        // 考虑 bucket 数组（桶）的缓存友好性对命中率的缩放
-        double bucket_cache_efficiency = calculateBucketCacheEfficiency(stats.bucket_array_size);
-        predicted_hit_rate *= bucket_cache_efficiency; // 最终命中率 = 基线 * 桶效率
+//         // 考虑 bucket 数组（桶）的缓存友好性对命中率的缩放
+//         double bucket_cache_efficiency = calculateBucketCacheEfficiency(stats.bucket_array_size);
+//         predicted_hit_rate *= bucket_cache_efficiency; // 最终命中率 = 基线 * 桶效率
         
-        // 打印预测结果到日志
-        elog(LOG,
-            "[CachePredict][SMP%d] "
-            "TableSize: %.2fMB -> Fits in %s, "
-            "PredictedHitRate: %.1f%%, BucketEfficiency: %.1f%%, "
-            "TotalCacheLines: %zu",
-            smp_id,
-            (double)stats.total_hash_table_size / (1024 * 1024),
-            cache_level,
-            predicted_hit_rate * 100,
-            bucket_cache_efficiency * 100,
-            stats.estimated_cache_lines);
-    }
+//         // 打印预测结果到日志
+//         elog(LOG,
+//             "[CachePredict][SMP%d] "
+//             "TableSize: %.2fMB -> Fits in %s, "
+//             "PredictedHitRate: %.1f%%, BucketEfficiency: %.1f%%, "
+//             "TotalCacheLines: %zu",
+//             smp_id,
+//             (double)stats.total_hash_table_size / (1024 * 1024),
+//             cache_level,
+//             predicted_hit_rate * 100,
+//             bucket_cache_efficiency * 100,
+//             stats.estimated_cache_lines);
+//     }
     
-private:
-    // 根据桶数组总体大小给出一个经验性的缓存效率因子
-    static double calculateBucketCacheEfficiency(size_t bucket_size) {
-        // 小的桶数组更容易被缓存，返回较高效率因子
-        if (bucket_size <= 16 * 1024) { // <= 16KB
-            return 1.0; // 完全缓存友好
-        } else if (bucket_size <= 64 * 1024) { // <= 64KB
-            return 0.9; // 大部分缓存友好
-        } else if (bucket_size <= 256 * 1024) { // <= 256KB
-            return 0.7; // 部分缓存友好
-        } else {
-            return 0.4; // 较大时缓存不友好
-        }
-    }
-};
+// private:
+//     // 根据桶数组总体大小给出一个经验性的缓存效率因子
+//     static double calculateBucketCacheEfficiency(size_t bucket_size) {
+//         // 小的桶数组更容易被缓存，返回较高效率因子
+//         if (bucket_size <= 16 * 1024) { // <= 16KB
+//             return 1.0; // 完全缓存友好
+//         } else if (bucket_size <= 64 * 1024) { // <= 64KB
+//             return 0.9; // 大部分缓存友好
+//         } else if (bucket_size <= 256 * 1024) { // <= 256KB
+//             return 0.7; // 部分缓存友好
+//         } else {
+//             return 0.4; // 较大时缓存不友好
+//         }
+//     }
+// };
 
 
 int64 SonicHashAgg::insertHashTbl(VectorBatch* batch, int idx, uint32 hashval, uint32 hashLoc)

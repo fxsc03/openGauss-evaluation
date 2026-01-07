@@ -1,0 +1,679 @@
+From beb630e71ee258440be879d68193ce806bb838e2 Mon Sep 17 00:00:00 2001
+From: songsihui <song.sihui@foxmail.com>
+Date: Mon, 24 Nov 2025 09:35:54 +0800
+Subject: [PATCH 4/4] trace_cache_obj
+
+---
+ .../communication/libcomm_utils/libcomm_memory.cpp | 315 ++++++++++++++++++---
+ .../libcomm_utils/q1 3058 2980 2972 2972           |  22 ++
+ src/gausskernel/process/stream/streamMain.cpp      |   8 +-
+ src/gausskernel/process/stream/streamProducer.cpp  |  15 +-
+ .../runtime/vecexecutor/vecnode/veccstore.cpp      |   8 +-
+ .../runtime/vecexecutor/vectorbatch.cpp            |   4 +
+ src/include/distributelayer/streamProducer.h       |  42 ++-
+ src/include/knl/knl_session.h                      |  55 +++-
+ src/include/vecexecutor/vectorbatch.h              |   2 +
+ 9 files changed, 420 insertions(+), 51 deletions(-)
+ create mode 100644 src/gausskernel/cbb/communication/libcomm_utils/q1 3058 2980 2972 2972
+
+diff --git a/src/gausskernel/cbb/communication/libcomm_utils/libcomm_memory.cpp b/src/gausskernel/cbb/communication/libcomm_utils/libcomm_memory.cpp
+index f37bdd9..9c962e9 100755
+--- a/src/gausskernel/cbb/communication/libcomm_utils/libcomm_memory.cpp
++++ b/src/gausskernel/cbb/communication/libcomm_utils/libcomm_memory.cpp
+@@ -70,6 +70,141 @@
+ #define STREAM_SCAN_WAIT 'W'
+ #define STREAM_SCAN_DATA 'D'
+ 
++// /* 返回 >=0 节点号，返回 -1 表示未知/失败 */
++// static int query_memory_numa_node(void *addr, size_t len)
++// {
++//     if (addr == NULL || len == 0) return -1;
++
++//     long page_size = sysconf(_SC_PAGESIZE);
++//     if (page_size <= 0) return -1;
++
++//     unsigned long start = (unsigned long)addr;
++//     unsigned long end = start + len - 1;
++//     unsigned long first_page = start & ~(page_size - 1);
++//     unsigned long last_page  = end   & ~(page_size - 1);
++
++//     unsigned long npages = (last_page - first_page) / page_size + 1;
++//     if (npages == 0) return -1;
++
++//     /* 限制采样页数，避免开销过大 */
++//     unsigned long max_sample = 16;
++//     unsigned long step = 1;
++//     if (npages > max_sample) step = npages / max_sample;
++
++//     unsigned long alloc_pages = (npages + step - 1) / step;
++//     if (alloc_pages == 0) return -1;
++
++//     void **pages = (void**)malloc(sizeof(void*) * alloc_pages);
++//     int *status   = (int*) malloc(sizeof(int) * alloc_pages);
++//     if (!pages || !status) { free(pages); free(status); return -1; }
++//     memset(status, 0, sizeof(int) * alloc_pages);
++
++//     unsigned long idx = 0;
++//     for (unsigned long p = 0; p < npages && idx < alloc_pages; p += step) {
++//         unsigned long off = first_page + p * page_size;
++//         pages[idx++] = (void*)off;
++//     }
++
++//     /* syscall: pid=0 (self). nodes=NULL -> will fill status[] with node id or negative err. */
++//     long rc = syscall(SYS_move_pages, 0, (long)idx, pages, NULL, status, 0);
++//     int result = -1;
++//     if (rc == 0) {
++//         /* 统计众数 */
++//         int counts[128];
++//         memset(counts, 0, sizeof(counts));
++//         int maxnode = -1, maxcnt = 0;
++//         for (unsigned long i = 0; i < idx; ++i) {
++//             if (status[i] >= 0 && status[i] < (int)(sizeof(counts)/sizeof(counts[0]))) {
++//                 counts[status[i]]++;
++//                 if (counts[status[i]] > maxcnt) {
++//                     maxcnt = counts[status[i]];
++//                     maxnode = status[i];
++//                 }
++//             }
++//         }
++//         if (maxnode >= 0) result = maxnode;
++//         else result = -1;
++//     } else {
++//         /* move_pages 失败（权限/内核限制等），返回 -1 */
++//         result = -1;
++//     }
++
++//     free(pages);
++//     free(status);
++//     return result;
++// }
++static int query_memory_numa_node(void *addr, size_t len)
++{
++    if (addr == NULL || len == 0)
++        return -1;
++
++    long page_size = sysconf(_SC_PAGESIZE);
++    if (page_size <= 0)
++        return -1;
++
++    unsigned long start = (unsigned long)addr;
++    unsigned long end = start + len - 1;
++
++    // 页对齐
++    unsigned long first_page = start & ~(page_size - 1);
++    unsigned long last_page  = end   & ~(page_size - 1);
++
++    // 总页数
++    unsigned long npages = (last_page - first_page) / page_size + 1;
++    if (npages == 0)
++        return -1;
++
++    // 分配 pages 和 status 数组
++    void **pages = (void**)malloc(sizeof(void*) * npages);
++    int  *status = (int*) malloc(sizeof(int) * npages);
++
++    if (!pages || !status) {
++        free(pages);
++        free(status);
++        return -1;
++    }
++
++    memset(status, 0, sizeof(int) * npages);
++
++    // 逐页填充
++    for (unsigned long i = 0; i < npages; ++i) {
++        pages[i] = (void*)(first_page + i * page_size);
++    }
++
++    // move_pages 查询
++    long rc = syscall(SYS_move_pages, 0, (long)npages,
++                      pages, NULL, status, 0);
++
++    int result = -1;
++
++    if (rc == 0) {
++        // 统计众数（哪个 NUMA node 出现次数最多）
++        int counts[128];
++        memset(counts, 0, sizeof(counts));
++
++        int maxnode = -1, maxcnt = 0;
++
++        for (unsigned long i = 0; i < npages; ++i) {
++            if (status[i] >= 0 && status[i] < 128) {
++                counts[status[i]]++;
++
++                if (counts[status[i]] > maxcnt) {
++                    maxcnt = counts[status[i]];
++                    maxnode = status[i];
++                }
++            }
++        }
++
++        if (maxnode >= 0)
++            result = maxnode;
++    }
++
++    free(pages);
++    free(status);
++    return result;
++}
++
++
+ extern bool executorEarlyStop();
+ 
+ /* release memory of communication layer, just for LLT */
+@@ -238,20 +373,74 @@ void gs_memory_send(
+     // gettimeofday(&copy_start, NULL);
+     StreamTimeCopyStart(t_thrd.pgxc_cxt.GlobalNetInstr);
+     // u_sess->stream_cxt.trace_cache_obj->start(u_sess->stream_cxt.producer_obj->m_streamNode->scan.plan.plan_node_id);
+-    struct timeval copy_start, copy_end;
+-    gettimeofday(&copy_start, NULL);
++    // struct timeval copy_start, copy_end;
++    // struct timeval numa_start, numa_end;
++    // gettimeofday(&copy_start, NULL);
+     /* Copy data to shared context. */
+     if (sharedContext->vectorized) {
+         Assert(sharedContext->sharedBatches != NULL);
+         batch = sharedContext->sharedBatches[nthChannel][u_sess->stream_cxt.smp_id];
+ 
+-        // 当前线程 CPU
+-        int src_cpu = sched_getcpu();
+-        // 映射 NUMA
+-        int src_numa = cpu_to_numa_node(src_cpu);
++        /*===========================================================
++        ⚠️ 先暂停计时：进入 NUMA 采样前记录时间
++        ===========================================================*/
++        // gettimeofday(&numa_start, NULL);
++
++        // /* ================= NUMA 采样开始 ================= */
++        // // 当前线程 CPU
++        // int src_cpu = sched_getcpu();
++        // // 映射 NUMA
++        // int src_numa = cpu_to_numa_node(src_cpu);
++        
++        // pid_t provtid = syscall(SYS_gettid);
++
++        // batch->producer_cpu  = src_cpu;
++        // batch->producer_numa = src_numa;
++        // batch->producer_tid = provtid;
++
++        // /* 按需为列级 numa 分配数组（如果还没分配） */
++        // if (batch->producer_col_numa == NULL && batchsrc->m_cols > 0) {
++        //     batch->producer_col_numa = (int*)malloc(sizeof(int) * batchsrc->m_cols);
++        //     if (batch->producer_col_numa) {
++        //         for (int c = 0; c < batchsrc->m_cols; ++c)
++        //             batch->producer_col_numa[c] = -1;
++        //     }
++        // }
++
++        // /* 遍历每列，采样该列数据的主 NUMA（基于 ScalarVector::m_vals） */
++        // for (int c = 0; c < batchsrc->m_cols; ++c) {
++        //     int col_node = -1;
++        //     ScalarVector *sv = NULL;
++
++        //     /* 访问方式依据 m_arr 类型：你的定义是 ScalarVector* m_arr;
++        //        如果 m_arr 是列数组，取 &m_arr[c]；如果是指针数组请改为 m_arr[c] */
++        //     sv = &batchsrc->m_arr[c];
++
++        //     if (sv && sv->m_vals) {
++        //         size_t datalen = (size_t)batchsrc->m_rows * sizeof(ScalarValue);
++        //         if (datalen > 0)
++        //             col_node = query_memory_numa_node((void*)sv->m_vals, datalen);
++        //     }
+ 
+-        batch->producer_cpu  = src_cpu;
+-        batch->producer_numa = src_numa;
++        //     if (batch->producer_col_numa)
++        //         batch->producer_col_numa[c] = col_node;
++
++        //     /* 如果总体 numa 未设置，优先用第一列结果作为代表 */
++        //     if (batch->producer_numa < 0 && col_node >= 0)
++        //         batch->producer_numa = col_node;
++        // }
++        // /* ====== 记录结束 ====== */
++        // /* ================= NUMA 采样结束 ================= */
++
++        // /*===========================================================
++        // ⚠️ 恢复计时：减掉 NUMA 采样耗时
++        // ===========================================================*/
++        // gettimeofday(&numa_end, NULL);
++
++        // /* 重新设置 copy_start，使 NUMA 时间不计入 copy 的测量 */
++        // copy_start.tv_sec  += (numa_end.tv_sec  - numa_start.tv_sec);
++        // copy_start.tv_usec += (numa_end.tv_usec - numa_start.tv_usec);
++        /*===========================================================*/
+ 
+         /* data copy */
+         if (-1 == nthRow) {
+@@ -259,12 +448,12 @@ void gs_memory_send(
+             Assert(batch->m_rows == 0);
+             batch->Copy<true, false>(batchsrc);
+             ready_to_send = true;
+-            sharedContext->processed_batches[nthChannel][u_sess->stream_cxt.smp_id]++;
+-            sharedContext->processed_rows[nthChannel][u_sess->stream_cxt.smp_id] += batchsrc->m_rows;
++            // sharedContext->processed_batches[nthChannel][u_sess->stream_cxt.smp_id]++;
++            // sharedContext->processed_rows[nthChannel][u_sess->stream_cxt.smp_id] += batchsrc->m_rows;
+         } else {
+             batch->CopyNth(batchsrc, nthRow);
+-            sharedContext->processed_batches[nthChannel][u_sess->stream_cxt.smp_id]++;
+-            sharedContext->processed_rows[nthChannel][u_sess->stream_cxt.smp_id] += batchsrc->m_rows;
++            // sharedContext->processed_batches[nthChannel][u_sess->stream_cxt.smp_id]++;
++            // sharedContext->processed_rows[nthChannel][u_sess->stream_cxt.smp_id] += batchsrc->m_rows;
+             if (BatchMaxSize == batch->m_rows) {
+                 ready_to_send = true;
+             }
+@@ -279,15 +468,15 @@ void gs_memory_send(
+             ready_to_send = true;
+         }
+     }
+-    gettimeofday(&copy_end, NULL);
+-    double elapsed = (copy_end.tv_sec - copy_start.tv_sec) * 1e6 +
+-                    (copy_end.tv_usec - copy_start.tv_usec);
+-    size_t bytes = batchsrc->m_rows * batchsrc->m_cols * sizeof(ScalarValue);
+-
+-    if (u_sess->stream_cxt.producer_obj &&
+-    u_sess->stream_cxt.producer_obj->m_sendMonitor) {
+-    u_sess->stream_cxt.producer_obj->m_sendMonitor->AddSendStat(bytes, elapsed);
+-    }
++    // gettimeofday(&copy_end, NULL);
++    // double elapsed = (copy_end.tv_sec - copy_start.tv_sec) * 1e6 +
++    //                 (copy_end.tv_usec - copy_start.tv_usec);
++    // size_t bytes = batchsrc->m_rows * batchsrc->m_cols * sizeof(ScalarValue);
++
++    // if (u_sess->stream_cxt.producer_obj &&
++    // u_sess->stream_cxt.producer_obj->m_sendMonitor) {
++    // u_sess->stream_cxt.producer_obj->m_sendMonitor->AddSendStat(bytes, elapsed);
++    // }
+     // u_sess->stream_cxt.trace_cache_obj->stop();
+     StreamTimeCopyEnd(t_thrd.pgxc_cxt.GlobalNetInstr);
+     //每个batch都要先加锁，确保对信号量状态的修改和线程等待计数的操作是原子安全的。if (waiting_count > 0) { LIBCOMM_PTHREAD_COND_SIGNAL(&cond); }：如果有线程正在等待该信号量（waiting_count 记录等待线程数），则通过条件变量 cond 唤醒其中一个等待线程，让它可以继续执行（获取信号量）。最后解锁，允许其他线程操作信号量。
+@@ -344,6 +533,11 @@ bool gs_consume_memory_data(StreamState* node, int loc)
+     StreamSharedContext* sharedContext = node->sharedContext;
+ 
+     NetWorkTimeCopyStart(t_thrd.pgxc_cxt.GlobalNetInstr);
++
++    // struct timeval copy_start, copy_end;
++    // struct timeval numa_start, numa_end;
++    // gettimeofday(&copy_start, NULL);
++    // size_t bytes = 0;   /* <- 先默认 0，只有 vectorized 时设置 */
+     /* Take data from the shared context. */
+     if (sharedContext->vectorized) {
+         VectorBatch* batchsrc = sharedContext->sharedBatches[u_sess->stream_cxt.smp_id][loc];
+@@ -355,21 +549,66 @@ bool gs_consume_memory_data(StreamState* node, int loc)
+ 
+         batchdst->Copy<true, false>(batchsrc);
+ 
+-        // 获取目标 CPU/NUMA
+-        int dst_cpu  = sched_getcpu();
+-        int dst_numa = cpu_to_numa_node(dst_cpu);
++        // /*===========================================================
++        // ⚠️ 先暂停计时：进入 NUMA 采样前记录时间
++        // ===========================================================*/
++        // gettimeofday(&numa_start, NULL);
+ 
+-        // 获取生产端 CPU/NUMA
+-        int src_cpu  = batchsrc->producer_cpu;
+-        int src_numa = batchsrc->producer_numa;   
++        // /* ================= NUMA 采样开始 ================= */
+ 
+-        elog(LOG,
+-            "[BatchPath] smp=%d loc=%d "
+-            "src={cpu=%d numa=%d} -> dst={cpu=%d numa=%d} rows=%d",
+-            u_sess->stream_cxt.smp_id, loc,
+-            src_cpu, src_numa,
+-            dst_cpu, dst_numa,
+-            batchsrc->m_rows);
++        // 获取目标 CPU/NUMA
++        // int dst_cpu  = sched_getcpu();
++        // int dst_numa = cpu_to_numa_node(dst_cpu);
++
++        // // 获取生产端 CPU/NUMA
++        // int src_cpu  = batchsrc->producer_cpu;
++        // int src_numa = batchsrc->producer_numa;  
++        // int src_pid   = batchsrc->producer_tid;
++
++        // /* 准备打印前几个列的列级 NUMA（避免日志太长） */
++        // int show_cols = batchsrc->m_cols;  
++        // StringInfoData tmp;
++        // initStringInfo(&tmp);
++        // for (int cc = 0; cc < show_cols; ++cc) {
++        //     int colnode = -1;
++        //     if (batchsrc->producer_col_numa) colnode = batchsrc->producer_col_numa[cc];
++        //     appendStringInfo(&tmp, "col%d_node=%d ", cc, colnode);
++        // }
++        // pid_t recvtid = syscall(SYS_gettid);
++        // elog(LOG,
++        //      "[BatchPath] PROTID=%d RECVTID=%d smp=%d loc=%d src={cpu=%d numa=%d} dst={cpu=%d numa=%d} rows=%d cols=%d %s",
++        //      src_pid,
++        //      recvtid,
++        //      u_sess->stream_cxt.smp_id, loc,
++        //      src_cpu, src_numa,
++        //      dst_cpu, dst_numa,
++        //      batchsrc->m_rows, batchsrc->m_cols,
++        //      tmp.data);
++    //     elog(LOG,
++    //  "[BatchPath] smp=%d loc=%d src={cpu=%d numa=%d} dst={cpu=%d numa=%d} rows=%d cols=%d %s sizeof(ScalarValue)=%zu",
++    //  u_sess->stream_cxt.smp_id, loc,
++    //  src_cpu, src_numa,
++    //  dst_cpu, dst_numa,
++    //  batchsrc->m_rows, batchsrc->m_cols,
++    //  tmp.data,
++    //  sizeof(ScalarValue));
++
++        // if (tmp.data) pfree(tmp.data);
++
++        // /* ================= NUMA 采样结束 ================= */
++
++        // /*===========================================================
++        // ⚠️ 恢复计时：减掉 NUMA 采样耗时
++        // ===========================================================*/
++        // gettimeofday(&numa_end, NULL);
++
++        // /* 重新设置 copy_start，使 NUMA 时间不计入 copy 的测量 */
++        // copy_start.tv_sec  += (numa_end.tv_sec  - numa_start.tv_sec);
++        // copy_start.tv_usec += (numa_end.tv_usec - numa_start.tv_usec);
++        /*===========================================================*/
++
++        /* 只有 VectorBatch 模式才计算 bytes */
++        // bytes = batchdst->m_rows * batchdst->m_cols * sizeof(ScalarValue);
+ 
+         batchsrc->Reset();
+     } else {
+@@ -389,6 +628,14 @@ bool gs_consume_memory_data(StreamState* node, int loc)
+         tuplesrc->tuplePointer = 0;
+         (void)gs_return_tuple(node);
+     }
++    // gettimeofday(&copy_end, NULL);
++    // double elapsed = (copy_end.tv_sec - copy_start.tv_sec) * 1e6 +
++    //                 (copy_end.tv_usec - copy_start.tv_usec);
++
++    // if (u_sess->stream_cxt.producer_obj &&
++    // u_sess->stream_cxt.producer_obj->m_recvMonitor) {
++    // u_sess->stream_cxt.producer_obj->m_recvMonitor->AddSendStat(bytes, elapsed);
++    // }
+     NetWorkTimeCopyEnd(t_thrd.pgxc_cxt.GlobalNetInstr);
+ 
+     struct hash_entry* entry = NULL;
+diff --git a/src/gausskernel/cbb/communication/libcomm_utils/q1 3058 2980 2972 2972 b/src/gausskernel/cbb/communication/libcomm_utils/q1 3058 2980 2972 2972
+new file mode 100644
+index 0000000..8919d20
+--- /dev/null
++++ b/src/gausskernel/cbb/communication/libcomm_utils/q1 3058 2980 2972 2972	
+@@ -0,0 +1,22 @@
++q1      3058    2980    2972    2972
++q2      304     207     199     199
++q3      871     542     505     505
++q4      788     351     345     345
++q5      943     747     759     747
++q6      124     132     117     117
++q7      409     418     418     418
++q8      559     406     420     406
++q9      1513    1528    1295    1295
++q10     977     832     853     832
++q11     237     205     205     205
++q12     264     207     214     207
++q13     1174    1008    943     943
++q14     258     229     233     229
++q15     241     263     268     263
++q16     374     354     354     354
++q17     237     209     212     209
++q18     3534    3505    3961    3505
++q19     591     296     291     291
++q20     287     290     288     288
++q21     1047    1015    988     988
++q22     1174    893     855     855
+\ No newline at end of file
+diff --git a/src/gausskernel/process/stream/streamMain.cpp b/src/gausskernel/process/stream/streamMain.cpp
+index a728f1f..07b2aab 100755
+--- a/src/gausskernel/process/stream/streamMain.cpp
++++ b/src/gausskernel/process/stream/streamMain.cpp
+@@ -142,12 +142,16 @@ int StreamMain()
+ 
+         /* Wait thread ID ready */
+         u_sess->stream_cxt.producer_obj->waitThreadIdReady();
+-        // u_sess->stream_cxt.trace_cache_obj = new ThreadPerfCacheProfiler();
++        u_sess->stream_cxt.trace_cache_obj = new ThreadPerfCacheProfiler();
+         //u_sess->stream_cxt.trace_tsc_obj = new ThreadTSCProfiler();
+         execute_stream_plan(u_sess->stream_cxt.producer_obj);
++        if (u_sess->stream_cxt.trace_cache_obj != NULL) {
++            u_sess->stream_cxt.trace_cache_obj->print_average_stats();
++        }
+         // elog(LOG,"nodeid %d",u_sess->stream_cxt.producer_obj->m_streamNode->scan.plan.plan_node_id);
+         // u_sess->stream_cxt.trace_cache_obj->print_average_stats();
+-        u_sess->stream_cxt.producer_obj->m_sendMonitor->PrintStat();
++        // u_sess->stream_cxt.producer_obj->m_sendMonitor->PrintStat();
++        // u_sess->stream_cxt.producer_obj->m_recvMonitor->PrintStat1();
+         execute_stream_end(u_sess->stream_cxt.producer_obj);
+         WLMReleaseNodeFromHash();
+         WLMReleaseIoInfoFromHash();
+diff --git a/src/gausskernel/process/stream/streamProducer.cpp b/src/gausskernel/process/stream/streamProducer.cpp
+index 791e2dc..ecb98c5 100755
+--- a/src/gausskernel/process/stream/streamProducer.cpp
++++ b/src/gausskernel/process/stream/streamProducer.cpp
+@@ -168,7 +168,8 @@ StreamProducer::StreamProducer(
+     rc = memcpy_s(m_plan, sizeof(PlannedStmt), pstmt, sizeof(PlannedStmt));
+     securec_check(rc, "\0", "\0");
+ 
+-    m_sendMonitor = new StreamSendMonitor("StreamProducer");
++    // m_sendMonitor = new StreamSendMonitor("StreamProducer");
++    // m_recvMonitor = new StreamSendMonitor("StreamProducer");
+ }
+ 
+ StreamProducer::~StreamProducer()
+@@ -195,10 +196,14 @@ StreamProducer::~StreamProducer()
+     m_distributeIdx = NULL;
+     m_skewState = NULL;
+     
+-    if (m_sendMonitor) {
+-        delete m_sendMonitor;
+-        m_sendMonitor = NULL;
+-    }
++    // if (m_sendMonitor) {
++    //     delete m_sendMonitor;
++    //     m_sendMonitor = NULL;
++    // }
++    // if (m_recvMonitor) {
++    //     delete m_recvMonitor;
++    //     m_recvMonitor = NULL;
++    // }
+ }
+ 
+ /*
+diff --git a/src/gausskernel/runtime/vecexecutor/vecnode/veccstore.cpp b/src/gausskernel/runtime/vecexecutor/vecnode/veccstore.cpp
+index 3d271db..5f9be4d 100644
+--- a/src/gausskernel/runtime/vecexecutor/vecnode/veccstore.cpp
++++ b/src/gausskernel/runtime/vecexecutor/vecnode/veccstore.cpp
+@@ -311,7 +311,10 @@ VectorBatch* ExecCStoreScan(CStoreScanState* node)
+ {
+     VectorBatch* p_out_batch = NULL;
+     VectorBatch* p_scan_batch = NULL;
+-    // u_sess->stream_cxt.trace_cache_obj->start(node->ps.plan->plan_node_id);
++    if (u_sess->stream_cxt.trace_cache_obj != NULL) {
++        u_sess->stream_cxt.trace_cache_obj->start(node->ps.plan->plan_node_id);
++    }
++    
+     // If we have runtime keys and they've not already been set up, do it now.
+     //
+     // evaluate the runtime key
+@@ -385,6 +388,9 @@ restart:
+         CHECK_FOR_INTERRUPTS();
+         goto restart;
+     }
++    if (u_sess->stream_cxt.trace_cache_obj != NULL) {
++        u_sess->stream_cxt.trace_cache_obj->stop();
++    }
+     // u_sess->stream_cxt.trace_cache_obj->stop();
+     // u_sess->stream_cxt.trace_cache_obj->print_average_stats();
+     return p_out_batch;
+diff --git a/src/gausskernel/runtime/vecexecutor/vectorbatch.cpp b/src/gausskernel/runtime/vecexecutor/vectorbatch.cpp
+index 74da33f..9f34e8f 100644
+--- a/src/gausskernel/runtime/vecexecutor/vectorbatch.cpp
++++ b/src/gausskernel/runtime/vecexecutor/vectorbatch.cpp
+@@ -523,6 +523,10 @@ void VectorBatch::Reset(bool reset_flag)
+             securec_check(rc, "\0", "\0");
+         }
+     }
++    if (producer_col_numa) {
++        free(producer_col_numa);
++        producer_col_numa = NULL;
++    }
+ }
+ 
+ void VectorBatch::ResetSelection(bool value)
+diff --git a/src/include/distributelayer/streamProducer.h b/src/include/distributelayer/streamProducer.h
+index 2bd5a70..deebfbd 100644
+--- a/src/include/distributelayer/streamProducer.h
++++ b/src/include/distributelayer/streamProducer.h
+@@ -102,7 +102,7 @@ public:
+      */
+     ~StreamSendMonitor()
+     {
+-        PrintStat();
++        //PrintStat();
+     }
+ 
+     /*
+@@ -172,6 +172,45 @@ public:
+                 duration / 1e6);
+         }
+     }
++    void PrintStat1()
++    {
++        // 调试输出（可见即可）
++        elog(DEBUG1, "PrintStat called: batches=%lu bytes=%lu",
++            m_totalBatches, m_totalBytes);
++
++        // 获取线程 ID（真正的 TID）
++        pid_t tid = syscall(SYS_gettid);
++
++        // 获取当前 CPU ID
++        int cpu = sched_getcpu();
++
++        // 直接根据 CPU 推算 NUMA node
++        int node = cpu_to_numa_node(cpu);
++
++        // 计算时间
++        struct timeval endTime;
++        gettimeofday(&endTime, NULL);
++
++        double duration = (endTime.tv_sec - m_startTime.tv_sec) * 1e6 +
++                      (endTime.tv_usec - m_startTime.tv_usec);
++
++        // 正常输出统计
++        if (m_totalBatches > 0) {
++            elog(LOG,
++                "[StreamMonitor] Receiver=%s "
++                "TID=%d CPU=%d NUMA=%d "
++                "Batches=%lu Bytes=%lu "
++                "AvgSendTime=%.2fus TotalTime=%.2fs",
++                m_name,
++                tid,
++                cpu,
++                node,
++                m_totalBatches,
++                m_totalBytes,
++                m_totalTimeUs / m_totalBatches,
++                duration / 1e6);
++        }
++    }
+ 
+ 
+ private:
+@@ -186,6 +225,7 @@ private:
+ class StreamProducer : public StreamObj {
+ public:
+     StreamSendMonitor* m_sendMonitor;
++    StreamSendMonitor* m_recvMonitor;
+ 
+     StreamProducer(StreamKey key, PlannedStmt* pstmt, Stream* streamNode, MemoryContext context, int socketNum,
+         StreamTransType type);
+diff --git a/src/include/knl/knl_session.h b/src/include/knl/knl_session.h
+index 8621c1e..96373b7 100644
+--- a/src/include/knl/knl_session.h
++++ b/src/include/knl/knl_session.h
+@@ -274,22 +274,61 @@ public:
+         // elog(LOG, "Initialized thread cache profiler for TID: %d", m_tid);
+     }
+ 
++    // void start(int parent_id) {
++    //     if (m_is_running) {
++    //         return; // 防止重复start
++    //     }
++    //     m_parent_id = parent_id;
++    //     if (fd_cache_ref > 0) {
++    //         ioctl(fd_cache_ref, PERF_EVENT_IOC_RESET, 0);
++    //         ioctl(fd_cache_ref, PERF_EVENT_IOC_ENABLE, 0);
++    //     }
++    //     if (fd_cache_miss > 0) {
++    //         ioctl(fd_cache_miss, PERF_EVENT_IOC_RESET, 0);
++    //         ioctl(fd_cache_miss, PERF_EVENT_IOC_ENABLE, 0);
++    //     }
++    //     m_is_running = true;
++    // }
+     void start(int parent_id) {
+         if (m_is_running) {
+-            return; // 防止重复start
++            return;
+         }
++        
+         m_parent_id = parent_id;
+-        if (fd_cache_ref > 0) {
+-            ioctl(fd_cache_ref, PERF_EVENT_IOC_RESET, 0);
+-            ioctl(fd_cache_ref, PERF_EVENT_IOC_ENABLE, 0);
++        
++        // 严谨的fd检查
++        if (fd_cache_ref >= 0) {  // 改为 >= 0
++            if (ioctl(fd_cache_ref, PERF_EVENT_IOC_RESET, 0) == -1) {
++                perror("PERF_EVENT_IOC_RESET failed for cache_ref");
++                // 处理错误，可能直接返回或标记失败
++                return;
++            }
++            if (ioctl(fd_cache_ref, PERF_EVENT_IOC_ENABLE, 0) == -1) {
++                perror("PERF_EVENT_IOC_ENABLE failed for cache_ref");
++                return;
++            }
+         }
+-        if (fd_cache_miss > 0) {
+-            ioctl(fd_cache_miss, PERF_EVENT_IOC_RESET, 0);
+-            ioctl(fd_cache_miss, PERF_EVENT_IOC_ENABLE, 0);
++        
++        if (fd_cache_miss >= 0) {  // 改为 >= 0
++            if (ioctl(fd_cache_miss, PERF_EVENT_IOC_RESET, 0) == -1) {
++                perror("PERF_EVENT_IOC_RESET failed for cache_miss");
++                // 需要回滚：禁用已经enable的fd
++                if (fd_cache_ref >= 0) {
++                    ioctl(fd_cache_ref, PERF_EVENT_IOC_DISABLE, 0);
++                }
++                return;
++            }
++            if (ioctl(fd_cache_miss, PERF_EVENT_IOC_ENABLE, 0) == -1) {
++                perror("PERF_EVENT_IOC_ENABLE failed for cache_miss");
++                // 回滚
++                if (fd_cache_ref >= 0) ioctl(fd_cache_ref, PERF_EVENT_IOC_DISABLE, 0);
++                if (fd_cache_miss >= 0) ioctl(fd_cache_miss, PERF_EVENT_IOC_DISABLE, 0);
++                return;
++            }
+         }
++        
+         m_is_running = true;
+     }
+-
+     void stop() {
+         if (!m_is_running) {
+             return;
+diff --git a/src/include/vecexecutor/vectorbatch.h b/src/include/vecexecutor/vectorbatch.h
+index 43ea20d..6dedf90 100644
+--- a/src/include/vecexecutor/vectorbatch.h
++++ b/src/include/vecexecutor/vectorbatch.h
+@@ -347,6 +347,8 @@ class VectorBatch : public BaseObject {
+ public:
+     int producer_cpu=0;    // 生产端 CPU
+     int producer_numa=0;   // 生产端 NUMA
++    int producer_tid=0;    // 生产端线程
++    int *producer_col_numa = NULL; /* 按需分配，长度为 m_cols */
+     // number of rows in the batch.
+     //
+     int m_rows;
+-- 
+1.8.3.1
+
