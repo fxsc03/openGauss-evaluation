@@ -177,6 +177,22 @@ public:
         return PointerGetDatum(Append(DatumGetPointer(value), VARSIZE_ANY(value)));
     }
 
+    // 获取实际使用的数据大小
+    size_t GetDataSize() const
+    {
+        if (m_head == NULL)
+            return 0;
+        
+        size_t totalSize = 0;
+        varBuf* current = m_head;
+        while (current != NULL) {
+            totalSize += current->len;
+            current = current->next;
+        }
+        return totalSize;
+    }
+
+
 private:
     // create a buffer;
     varBuf* CreateBuf(int datalen);

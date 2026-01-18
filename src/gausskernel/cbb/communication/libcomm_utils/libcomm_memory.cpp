@@ -342,6 +342,43 @@ bool gs_return_tuple(StreamState* node)
  * @param[IN] loc: data location
  * @return bool: true -- found data
  */
+/*
+ * @Description: 计算 VectorBatch 中实际存储的数据大小（简化版本，仿照 Copy 函数逻辑）
+ * @in batch: VectorBatch 指针
+ * @return: 实际数据大小（字节）
+ */
+ static size_t GetVectorBatchDataSize(VectorBatch* batch)
+ {
+     if (batch == NULL || batch->m_arr == NULL || batch->m_rows == 0)
+         return 0;
+     
+     size_t totalDataSize = 0;
+     
+     // 仿照 Copy 函数：遍历每一列
+     for (int i = 0; i < batch->m_cols; i++) {
+         ScalarVector* vec = &batch->m_arr[i];
+         
+         // 仿照 copyDeep 函数的逻辑
+         if (vec->m_desc.encoded) {
+             // encoded 类型：实际数据存储在 m_buf 中
+             // 直接获取 VarBuf 中实际使用的总大小
+             if (vec->m_buf != NULL) {
+                totalDataSize += vec->m_buf->GetDataSize();
+            }
+         } else {
+             // 非 encoded 类型：实际数据在 m_vals 数组中
+             // 仿照 copyDeep 中直接 memcpy 的逻辑
+             // 只计算实际使用的行数（m_rows），不是 BatchMaxSize
+             totalDataSize += vec->m_rows * sizeof(ScalarValue);
+         }
+     }
+     
+     return totalDataSize;
+ }
+ 
+ static size_t remote_memory_KB = 0;
+ static size_t local_memory_KB = 0;
+ static size_t total_bytes = 0;
 bool gs_consume_memory_data(StreamState* node, int loc)
 {
     StreamSharedContext* sharedContext = node->sharedContext;
@@ -381,7 +418,22 @@ bool gs_consume_memory_data(StreamState* node, int loc)
         //     dst_cpu, dst_numa,
         //     batchsrc->m_rows);
 
+        size_t bytes = GetVectorBatchDataSize(batchsrc);
+        
+        // elog(LOG, "remote_memory_KB=%lu, local_memory_KB=%lu, total_bytes=%lu", remote_memory_KB, local_memory_KB, total_bytes);
+        // total_bytes += bytes;
+        // remote_memory_KB += bytes;
+        // local_memory_KB += bytes;
+        if (u_sess->stream_cxt.producer_obj &&
+        u_sess->stream_cxt.producer_obj->m_sendMonitor) {
 
+
+        // printf("[gs_consume_memory_data] plan_node_id=%u src_cpu=%d src_numa=%d dst_cpu=%d dst_numa=%d bytes=%lu\n", 
+        //        plan_node_id, src_cpu, src_numa, dst_cpu, dst_numa, bytes);
+        // printf("remote_memory_KB=%lu, local_memory_KB=%lu, total_bytes=%lu\n", remote_memory_KB, local_memory_KB, total_bytes);
+        // printf("bytes=%lu, src_numa=%d, dst_numa=%d\n", bytes, src_numa, dst_numa);
+        u_sess->stream_cxt.producer_obj->m_sendMonitor->AddConsumeStat(bytes, src_numa, dst_numa);
+        }
 
 
                 

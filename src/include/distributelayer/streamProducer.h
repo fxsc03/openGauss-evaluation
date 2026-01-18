@@ -25,6 +25,7 @@
 #ifndef SRC_INCLUDE_DISTRIBUTELAYER_STREAMPRODUCER_H_
 #define SRC_INCLUDE_DISTRIBUTELAYER_STREAMPRODUCER_H_
 
+#include <pthread.h>
 #include "distributelayer/streamCore.h"
 
 
@@ -71,6 +72,13 @@ inline int cpu_to_numa_node(int cpu)
  *
  * 在析构时（或手动调用 PrintStat）自动打印统计结果。
  */
+
+ // 累加到全局静态变量
+static double total_local_data = 0.0;
+static double total_remote_data = 0.0;
+static size_t s_global_numa_map_KB[4][4] = {{0}};
+static pthread_mutex_t s_print_stat_lock = PTHREAD_MUTEX_INITIALIZER;
+
 class StreamSendMonitor {
 public:
     /*
@@ -128,6 +136,11 @@ public:
         m_totalTimeUs += time_us; // 累加耗时
     }
 
+    void AddConsumeStat(size_t bytes, int src_numa, int dst_numa)
+    {
+        m_numa_map_KB[src_numa][dst_numa] += (bytes / 1024);
+        // m_numa_map_batch[src_numa][dst_numa]++;
+    }
     /*
      * PrintStat
      * ----------
@@ -141,47 +154,44 @@ public:
      *   - Producer 存活总时长（秒）
      */
 
-    void PrintStat()
-    {
-        // 调试输出（可见即可）
-        elog(DEBUG1, "PrintStat called: batches=%lu bytes=%lu",
-            m_totalBatches, m_totalBytes);
+    void PrintStat()    {
+        pthread_mutex_lock(&s_print_stat_lock);
 
-        // 获取线程 ID（真正的 TID）
-        pid_t tid = syscall(SYS_gettid);
-
-        // 获取当前 CPU ID
-        int cpu = sched_getcpu();
-
-        // 直接根据 CPU 推算 NUMA node
-        int node = cpu_to_numa_node(cpu);
-
-        // 计算时间
-        struct timeval endTime;
-        gettimeofday(&endTime, NULL);
-
-        double duration = (endTime.tv_sec - m_startTime.tv_sec) * 1e6 +
-                      (endTime.tv_usec - m_startTime.tv_usec);
-
-        // 正常输出统计
-        if (m_totalBatches > 0) {
-            elog(LOG,
-                "[StreamMonitor] Producer=%s "
-                "TID=%d CPU=%d NUMA=%d "
-                "Batches=%lu Bytes=%lu "
-                "AvgSendTime=%.2fus TotalTime=%.2fs",
-                m_name,
-                tid,
-                cpu,
-                node,
-                m_totalBatches,
-                m_totalBytes,
-                m_totalTimeUs / m_totalBatches,
-                duration / 1e6);
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 4; j++) {
+                s_global_numa_map_KB[i][j] += m_numa_map_KB[i][j];
+                m_numa_map_KB[i][j] = 0;
+            }
         }
+
+        for(int i = 0; i < 4; i++) {
+            total_local_data += s_global_numa_map_KB[i][i];
+        }
+        for (int i = 0; i < 4; i++) {
+            double local_rate = 0.0;
+            int sum_dst_numa = 0;
+            for (int j = 0; j < 4; j++) {
+                sum_dst_numa += s_global_numa_map_KB[j][i];
+            }
+
+            local_rate = (double)s_global_numa_map_KB[i][i] / (double)sum_dst_numa;
+            // elog(LOG, "Local NUMA[%d] rate=%f, sum_dst_numa=%d", i, local_rate, sum_dst_numa);
+            // total_local_data += s_global_numa_map_KB[i][i];
+            total_remote_data += sum_dst_numa - s_global_numa_map_KB[i][i];
+        }
+
+        for(int i = 0; i < 4; i++) {
+            for(int j = 0; j < 4; j++) {
+               s_global_numa_map_KB[i][j] = 0;
+            }
+        }
+
+
+        elog(LOG, "Total local data = %f, Total remote data = %f", total_local_data, total_remote_data);
+        elog(LOG, "Total remote rate = %f", total_remote_data / (total_local_data + total_remote_data));
+        elog(LOG, "[StreamMonitor] ================================================================");
+        pthread_mutex_unlock(&s_print_stat_lock);
     }
-
-
 private:
     char m_name[NAMEDATALEN];  // producer 名称或标识符
     uint64 m_totalBatches;     // 累积 batch 数
@@ -191,6 +201,7 @@ private:
 
     uint64 m_numa_map_byte[4][4]; // 记录消费者和生产者的NUMA信息对应的发送字节数
     uint64 m_numa_map_batch[4][4]; // 记录消费者和生产者的NUMA信息对应的批次数
+    uint64 m_numa_map_KB[4][4]; // 记录消费者和生产者的NUMA信息对应的发送字节数
 };
 
 
