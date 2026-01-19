@@ -39,7 +39,6 @@
  */
 
 #include "codegen/gscodegen.h"
-
 #include "postgres.h"
 #include "knl/knl_variable.h"
 
@@ -2457,6 +2456,42 @@ static void ExecuteVectorizedPlan(EState *estate, PlanState *planstate, CmdType 
     /*
      * Loop until we've processed the proper number of tuples from the plan.
      */
+    // StreamProducer* prod = u_sess->stream_cxt.producer_obj;
+    // int planNodeId = prod->m_streamNode->scan.plan.plan_node_id + 1;
+    // u_sess->stream_cxt.trace_cache_obj = new ThreadPerfCacheProfiler();
+    // u_sess->stream_cxt.trace_cache_obj->start(planNodeId);
+    // OperatorNUMAState *op =
+    //     &g_instance.operator_numa_table[planNodeId];
+    // if (pg_atomic_read_u32(&op->initialized) == 0) {
+
+    //     uint32 expected = 0;
+    //     if (pg_atomic_compare_exchange_u32(
+    //             &op->initialized,
+    //             &expected,
+    //             1)) {
+
+    //         op->planNodeId = planNodeId;
+    //         op->dop = u_sess->stream_cxt.producer_dop;
+    //         op->numa_mask = 0;
+    //         op->batch_since_bind = 0;
+    //         op->last_bound_numa = -1;
+
+    //         for (int n = 0; n < MAX_NUMA_NODES; n++) {
+    //             pg_atomic_init_u32(&op->active_per_numa[n], 0);
+    //             op->last_active_snapshot[n] = 0;
+    //         }
+    //     }
+    // }
+
+
+    //     /* NUMA-local 统计 */
+    // int cpu_id = sched_getcpu();
+    // int numa_node = (cpu_id % 96) / 24; 
+    //     pg_atomic_fetch_add_u32(
+    //         &op->active_per_numa[numa_node], 1);
+
+
+
     for (;;) {
         /* Reset the per-output-tuple exprcontext */
         ResetPerTupleExprContext(estate);
@@ -2465,7 +2500,7 @@ static void ExecuteVectorizedPlan(EState *estate, PlanState *planstate, CmdType 
          * Execute the plan and obtain a tuple
          */
         batch = VectorEngine(planstate);
-
+        // u_sess->stream_cxt.trace_cache_obj->stop();
         /*
          * if the tuple is null, then we assume there is nothing more to
          * process so we just end the loop...
@@ -2535,6 +2570,13 @@ static void ExecuteVectorizedPlan(EState *estate, PlanState *planstate, CmdType 
             << (chunkSizeInBits - BITS_IN_MB);
         u_sess->instr_cxt.global_instr->SetPeakNodeMemory(planstate->plan->plan_node_id, peak_memory);
     }
+    // if (u_sess->stream_cxt.trace_cache_obj != NULL) {
+       
+    // }
+    // u_sess->stream_cxt.trace_cache_obj->print_average_stats();
+    // op->in_active_window = false;
+    // pg_atomic_fetch_sub_u32(&op->active_threads, 1);
+    // pg_atomic_fetch_sub_u32(&op->active_per_numa[numa_node], 1);
 }
 
 

@@ -226,7 +226,26 @@ class StreamProducer : public StreamObj {
 public:
     StreamSendMonitor* m_sendMonitor;
     StreamSendMonitor* m_recvMonitor;
+    pid_t worker_tid;      /* Linux thread id */
+    int   home_numa;       /* initial NUMA node */
+    bool  numa_recorded;   /* guard */
+    int migration_budget;
+    uint64_t cross_numa_cnt;
+    uint64_t cross_total_numa_cnt;
+    uint64_t MIGRATION_BUDGET = 4000 ;
 
+    typedef struct OperatorInfo {
+        int plan_node_id;                  // 执行计划节点ID
+        int current_numa_node;             // 当前绑定的NUMA节点
+        int target_numa_node;              // 目标NUMA节点（迁移时使用）
+        uint64_t rows_processed;           // 处理的行数
+        uint64_t bytes_processed;          // 处理的字节数
+        uint64_t cache_misses;             // cache miss次数
+        TimestampTz start_time;            // 开始时间
+        bool can_migrate;                  // 是否可以迁移
+        bool is_leaf_scan;                 // 是否是叶子节点扫描
+    } OperatorInfo;
+    
     StreamProducer(StreamKey key, PlannedStmt* pstmt, Stream* streamNode, MemoryContext context, int socketNum,
         StreamTransType type);
 

@@ -93,9 +93,17 @@ const int MAX_AUDIT_NUM = 48;
 
 /* Maximum number of max replication slots */
 #define MAX_REPLICATION_SLOT_NUM 100
-
+#define MAX_OPERATORS 128
 #define MAX_CBM_THREAD_NUM 10
 #define INVAILD_CBM_THREAD_NUM 99
+
+#define MAX_NUMA_NODES 4
+#define MAX_NUMA_FOOTPRINT 3
+#define CORES_PER_NUMA 48
+#define PRIMARY_BIAS 1.2
+#define BATCH_EPOCH            1024    /* 一个 epoch = 1024 batches */
+#define MIN_BATCH_RESIDENCE    4096    /* 最少驻留 4096 batches */
+#define IOI_IMPROVE_THRESH     0.10f   /* IOI 改善阈值 */
 
 #ifndef ENABLE_MULTIPLE_NODES
 const int DB_CMPT_MAX = 5;
@@ -1416,6 +1424,56 @@ typedef struct knl_g_matrix_mem_context {
     bool matrix_mem_inited;
 } knl_g_matrix_mem_context;
 
+typedef struct {
+    int p_max[4];     // 每个 NUMA 上最大算子线程占比
+    float ioi[4];     // IOI = 1 - p_max
+    int numa_dom_threads[4];   // dominant operator threads
+    int numa_total_threads[4];
+    int dop; 
+} IOICtrl;
+
+// typedef struct OperatorNUMAState {
+//     int planNodeId;
+//     int dop;
+
+//     int primary_numa;
+//     uint8 numa_mask;
+//     bool in_active_window;
+//     int threads_per_numa[MAX_NUMA_NODES];
+
+//     pg_atomic_uint32 active_threads;
+//     pg_atomic_uint32 active_per_numa[MAX_NUMA_NODES];  // ⭐ 新增
+//     uint32 batch_since_bind;
+//     int    last_bound_numa;
+//     bool initialized;
+// } OperatorNUMAState;
+typedef struct OperatorNUMAState {
+    int planNodeId;
+    int dop;
+
+    int primary_numa;
+    uint8 numa_mask;
+    bool in_active_window;
+    int threads_per_numa[MAX_NUMA_NODES];
+
+    /* NUMA-local 原子计数 */
+    pg_atomic_uint32 active_per_numa[MAX_NUMA_NODES]
+        __attribute__((aligned(64)));
+
+    /* ===== batch / epoch 控制 ===== */
+    uint32 batch_since_bind;          /* 你已有：epoch 内 batch 计数 */
+
+    uint32 batches_since_migration;   /* ⭐ 新增：距离上次迁移的 batch 数 */
+
+    int    last_bound_numa;            /* 你已有 */
+    // bool   initialized;
+    pg_atomic_uint32 initialized;   // ✅ 原子
+
+    uint32 last_active_snapshot[MAX_NUMA_NODES];
+} OperatorNUMAState;
+
+
+
 typedef struct knl_instance_context {
     knl_virtual_role role;
     volatile int status;
@@ -1572,10 +1630,34 @@ typedef struct knl_instance_context {
     std::atomic<bool> fi_ctx_inited;
     bool fi_ctx_init_finished;
 #endif
+    // typedef struct {
+    //     int numa_ioi[4];        // 4个NUMA的IOI值
+    //     int numa_ops[4];        // 每个NUMA上的operator数量
+    //     int numa_threads[4];    // 每个NUMA上的线程数量
+    //     int last_check;         // 上次检查时间
+    //     int dop;                // 查询并行度
+    //     int total_cpus;         // 总CPU数量
+    //     int cpus_per_numa;      // 每个NUMA的CPU数量
+    //     int ht_offset;          // 超线程偏移量
+
+    // } IOICtrl;
+    // 
+    IOICtrl ioi_ctrl = {0};
+    OperatorNUMAState operator_numa_table[MAX_OPERATORS];
+    
+
+    
 } knl_instance_context;
 
 extern long random();
 extern void knl_instance_init();
+extern int choose_numa_for_operator(int nodeid);
+extern void update_ioi();
+extern void bind_thread_to_numa(int numa);
+extern void bind_thread_to_numa_with_drift(int numa,int dop);
+extern int pick_worker_numa(OperatorNUMAState *op);
+extern void update_ioi_concurrent();
+extern void update_ioi_concurrent_debug();
 extern void knl_g_set_redo_finish_status(uint32 status);
 extern void knl_g_clear_local_redo_finish_status();
 extern bool knl_g_get_local_redo_finish_status();
@@ -1606,7 +1688,8 @@ extern void add_numa_alloc_info(void* numaAddr, size_t length);
 #define DEFAULT_CREATE_LOCAL_INDEX (u_sess->attr.attr_storage.default_index_kind == DEFAULT_INDEX_KIND_LOCAL)
 #define DEFAULT_CREATE_GLOBAL_INDEX (u_sess->attr.attr_storage.default_index_kind == DEFAULT_INDEX_KIND_GLOBAL)
 
-//我自己加的开始
+// //我自己加的开始
+
 #ifdef __USE_NUMA
 typedef struct NumaMemAllocView {
     void* numaAddr;   // NUMA 内存块起始地址

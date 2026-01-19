@@ -20,6 +20,8 @@
  *
  * -------------------------------------------------------------------------
  */
+#include <numa.h>
+#include <numaif.h>
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
@@ -133,6 +135,7 @@
 //     free(status);
 //     return result;
 // }
+
 static int query_memory_numa_node(void *addr, size_t len)
 {
     if (addr == NULL || len == 0)
@@ -315,6 +318,42 @@ bool gs_is_databuff_empty(StreamSharedContext* sharedContext, int nthChannel)
 }
 #endif
 
+// 消费者切核函数
+// 获取消费者的smp_id，并将当前线程绑定到与smp_id一致的cpuid上
+static bool switch_to_initial_cpu2(void)
+{
+    // 获取当前消费者的 smp_id
+    int consumer_smp_id = u_sess->stream_cxt.smp_id;
+    
+    if (consumer_smp_id < 0) {
+        return false;
+    }
+    
+    // 假设 smp_id 直接对应 cpuid（如果系统中有映射关系，需要相应调整）
+    int target_cpuid = consumer_smp_id;
+    
+    // 获取当前CPU
+    int current_cpuid = sched_getcpu();
+    
+    // 如果已经在正确的CPU上，无需切换
+    if (current_cpuid == target_cpuid) {
+        return true;
+    }
+    
+    // printf("switch to cpu %d\n", target_cpuid);
+
+    
+    // 设置CPU亲和性，切换到目标CPU
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(target_cpuid, &cpuset);
+    
+    int ret = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+    
+    return true;
+}
+
+
 /*
  * @Description: Send data to local consumer through shared memory
  *
@@ -338,11 +377,46 @@ void gs_memory_send(
         -1,
         u_sess->stream_cxt.producer_obj->getParentPlanNodeId(),
         global_node_definition ? global_node_definition->num_nodes : -1);
-    // struct timeval stream_start, stream_end;
-    // struct timeval copy_start, copy_end;
-    // gettimeofday(&stream_start, NULL);
     StreamTimeSendStart(t_thrd.pgxc_cxt.GlobalNetInstr);
     entry = sharedContext->quota_entrys[nthChannel][u_sess->stream_cxt.smp_id];
+
+    // StreamProducer* prod = u_sess->stream_cxt.producer_obj;
+    // if (prod != NULL) {
+    //     int planNodeId = prod->m_streamNode->scan.plan.plan_node_id;
+        // OperatorNUMAState *op = &g_instance.operator_numa_table[planNodeId];
+
+    //     if (op->batch_since_bind >= 256) {
+
+    //         /* 结束上一个窗口 */
+    //         if (op->in_active_window) {
+    //             pg_atomic_fetch_sub_u32(&op->active_threads, 1);
+    //             pg_atomic_fetch_sub_u32(&op->active_per_numa[op->last_bound_numa], 1);
+                // op->in_active_window = false;
+    //         }
+
+    //         /* 记录当前 NUMA（仅用于统计，不 bind） */
+    //         int cpu = sched_getcpu();
+    //         int my_numa = -1;
+    //         if (cpu <= 23 || (cpu >= 96  && cpu <= 119))
+    //             my_numa = 0;
+    //         else if (cpu <= 47 || (cpu >= 120 && cpu <= 143))
+    //             my_numa = 1;
+    //         else if (cpu <= 71 || (cpu >= 144 && cpu <= 167))
+    //             my_numa = 2;
+    //         else
+    //             my_numa = 3;
+    //         /* 打开新窗口 */
+    //         pg_atomic_fetch_add_u32(&op->active_threads, 1);
+    //         pg_atomic_fetch_add_u32(&op->active_per_numa[my_numa], 1);
+
+    //         op->last_bound_numa = my_numa;
+    //         op->batch_since_bind = 0;
+    //         op->in_active_window = true;
+    //     }
+
+    //     op->batch_since_bind++;
+    // }
+
     for (;;) {
         /* Check for interrupt at the beginning of the loop. */
         CHECK_FOR_INTERRUPTS();
@@ -372,88 +446,18 @@ void gs_memory_send(
     // gettimeofday(&stream_end, NULL);
     // gettimeofday(&copy_start, NULL);
     StreamTimeCopyStart(t_thrd.pgxc_cxt.GlobalNetInstr);
-    // u_sess->stream_cxt.trace_cache_obj->start(u_sess->stream_cxt.producer_obj->m_streamNode->scan.plan.plan_node_id);
-    // struct timeval copy_start, copy_end;
-    // struct timeval numa_start, numa_end;
-    // gettimeofday(&copy_start, NULL);
     /* Copy data to shared context. */
     if (sharedContext->vectorized) {
         Assert(sharedContext->sharedBatches != NULL);
         batch = sharedContext->sharedBatches[nthChannel][u_sess->stream_cxt.smp_id];
-
-        /*===========================================================
-        ⚠️ 先暂停计时：进入 NUMA 采样前记录时间
-        ===========================================================*/
-        // gettimeofday(&numa_start, NULL);
-
-        // /* ================= NUMA 采样开始 ================= */
-        // // 当前线程 CPU
-        // int src_cpu = sched_getcpu();
-        // // 映射 NUMA
-        // int src_numa = cpu_to_numa_node(src_cpu);
-        
-        // pid_t provtid = syscall(SYS_gettid);
-
-        // batch->producer_cpu  = src_cpu;
-        // batch->producer_numa = src_numa;
-        // batch->producer_tid = provtid;
-
-        // /* 按需为列级 numa 分配数组（如果还没分配） */
-        // if (batch->producer_col_numa == NULL && batchsrc->m_cols > 0) {
-        //     batch->producer_col_numa = (int*)malloc(sizeof(int) * batchsrc->m_cols);
-        //     if (batch->producer_col_numa) {
-        //         for (int c = 0; c < batchsrc->m_cols; ++c)
-        //             batch->producer_col_numa[c] = -1;
-        //     }
-        // }
-
-        // /* 遍历每列，采样该列数据的主 NUMA（基于 ScalarVector::m_vals） */
-        // for (int c = 0; c < batchsrc->m_cols; ++c) {
-        //     int col_node = -1;
-        //     ScalarVector *sv = NULL;
-
-        //     /* 访问方式依据 m_arr 类型：你的定义是 ScalarVector* m_arr;
-        //        如果 m_arr 是列数组，取 &m_arr[c]；如果是指针数组请改为 m_arr[c] */
-        //     sv = &batchsrc->m_arr[c];
-
-        //     if (sv && sv->m_vals) {
-        //         size_t datalen = (size_t)batchsrc->m_rows * sizeof(ScalarValue);
-        //         if (datalen > 0)
-        //             col_node = query_memory_numa_node((void*)sv->m_vals, datalen);
-        //     }
-
-        //     if (batch->producer_col_numa)
-        //         batch->producer_col_numa[c] = col_node;
-
-        //     /* 如果总体 numa 未设置，优先用第一列结果作为代表 */
-        //     if (batch->producer_numa < 0 && col_node >= 0)
-        //         batch->producer_numa = col_node;
-        // }
-        // /* ====== 记录结束 ====== */
-        // /* ================= NUMA 采样结束 ================= */
-
-        // /*===========================================================
-        // ⚠️ 恢复计时：减掉 NUMA 采样耗时
-        // ===========================================================*/
-        // gettimeofday(&numa_end, NULL);
-
-        // /* 重新设置 copy_start，使 NUMA 时间不计入 copy 的测量 */
-        // copy_start.tv_sec  += (numa_end.tv_sec  - numa_start.tv_sec);
-        // copy_start.tv_usec += (numa_end.tv_usec - numa_start.tv_usec);
-        /*===========================================================*/
-
         /* data copy */
         if (-1 == nthRow) {
             /* Do deep copy of all rows, for local roundrobin & local broadcast. */
             Assert(batch->m_rows == 0);
             batch->Copy<true, false>(batchsrc);
             ready_to_send = true;
-            // sharedContext->processed_batches[nthChannel][u_sess->stream_cxt.smp_id]++;
-            // sharedContext->processed_rows[nthChannel][u_sess->stream_cxt.smp_id] += batchsrc->m_rows;
         } else {
             batch->CopyNth(batchsrc, nthRow);
-            // sharedContext->processed_batches[nthChannel][u_sess->stream_cxt.smp_id]++;
-            // sharedContext->processed_rows[nthChannel][u_sess->stream_cxt.smp_id] += batchsrc->m_rows;
             if (BatchMaxSize == batch->m_rows) {
                 ready_to_send = true;
             }
@@ -468,20 +472,7 @@ void gs_memory_send(
             ready_to_send = true;
         }
     }
-    // gettimeofday(&copy_end, NULL);
-    // double elapsed = (copy_end.tv_sec - copy_start.tv_sec) * 1e6 +
-    //                 (copy_end.tv_usec - copy_start.tv_usec);
-    // size_t bytes = batchsrc->m_rows * batchsrc->m_cols * sizeof(ScalarValue);
-
-    // if (u_sess->stream_cxt.producer_obj &&
-    // u_sess->stream_cxt.producer_obj->m_sendMonitor) {
-    // u_sess->stream_cxt.producer_obj->m_sendMonitor->AddSendStat(bytes, elapsed);
-    // }
-    // u_sess->stream_cxt.trace_cache_obj->stop();
     StreamTimeCopyEnd(t_thrd.pgxc_cxt.GlobalNetInstr);
-    //每个batch都要先加锁，确保对信号量状态的修改和线程等待计数的操作是原子安全的。if (waiting_count > 0) { LIBCOMM_PTHREAD_COND_SIGNAL(&cond); }：如果有线程正在等待该信号量（waiting_count 记录等待线程数），则通过条件变量 cond 唤醒其中一个等待线程，让它可以继续执行（获取信号量）。最后解锁，允许其他线程操作信号量。
-    //统计唤醒次数和唤醒开销
-    /* send the signal if copy finished */
     if (ready_to_send) {
 #ifdef __aarch64__
         pg_memory_barrier();
@@ -530,15 +521,85 @@ bool gs_return_tuple(StreamState* node)
  */
 bool gs_consume_memory_data(StreamState* node, int loc)
 {
+
+    // switch_to_initial_cpu2();
+
     StreamSharedContext* sharedContext = node->sharedContext;
 
     NetWorkTimeCopyStart(t_thrd.pgxc_cxt.GlobalNetInstr);
 
-    // struct timeval copy_start, copy_end;
-    // struct timeval numa_start, numa_end;
-    // gettimeofday(&copy_start, NULL);
-    // size_t bytes = 0;   /* <- 先默认 0，只有 vectorized 时设置 */
-    /* Take data from the shared context. */
+    // StreamProducer* prod = u_sess->stream_cxt.producer_obj;
+    // OperatorNUMAState *op = NULL;
+    // int my_numa = -1;
+
+    // if (prod != NULL) {
+    //     int planNodeId =
+    //         prod->m_streamNode->scan.plan.plan_node_id + 1;
+
+    //     OperatorNUMAState *op =
+    //         &g_instance.operator_numa_table[planNodeId];
+
+    //     /* ===== batch 计数 ===== */
+    //     op->batch_since_bind++;
+    //     op->batches_since_migration++;
+
+    //     /* ===== epoch 边界 ===== */
+    //     if (op->batch_since_bind >= BATCH_EPOCH) {       
+    //         op->batch_since_bind = 0;
+
+    //         /* ① 更新 IOI（epoch 粒度） */
+    //         update_ioi_concurrent();
+
+    //         int cur_numa = op->last_bound_numa;
+    //         int tgt_numa = choose_numa_for_operator(planNodeId);
+
+    //         if (tgt_numa != cur_numa) {
+
+    //             if (op->batches_since_migration >=
+    //                 MIN_BATCH_RESIDENCE) {
+
+    //                 bind_thread_to_numa_with_drift(
+    //                     tgt_numa, op->dop);
+
+    //                 // MemoryContextReset(op->exec_ctx);
+    //                 op->last_bound_numa = tgt_numa;
+    //                 op->batches_since_migration = 0;
+    //             }
+    //         }
+    //     }
+    // }
+
+    //for thread migration
+    // if (prod != NULL) {
+    //     int cpu_id = sched_getcpu();
+    //     int current_numa = -1;
+    //     // 精确计算 NUMA
+    //     if ((cpu_id >= 0 && cpu_id <= 23) || (cpu_id >= 96 && cpu_id <= 119))
+    //         current_numa = 0;
+    //     else if ((cpu_id >= 24 && cpu_id <= 47) || (cpu_id >= 120 && cpu_id <= 143))
+    //         current_numa = 1;
+    //     else if ((cpu_id >= 48 && cpu_id <= 71) || (cpu_id >= 144 && cpu_id <= 167))
+    //         current_numa = 2;
+    //     else if ((cpu_id >= 72 && cpu_id <= 95) || (cpu_id >= 168 && cpu_id <= 191))
+    //         current_numa = 3;
+    //     // 如果父节点不在 home_numa
+    //     if (unlikely(current_numa != prod->home_numa)) {
+    //         prod->cross_numa_cnt++;
+    //         // 每达到迁移预算就 bind 回 home NUMA
+    //         if (prod->cross_numa_cnt >= prod->MIGRATION_BUDGET) {
+    //             cpu_set_t cpuset;
+    //             CPU_ZERO(&cpuset);
+    //             int base_cpu = prod->home_numa * 48;
+    //             for (int i = 0; i < 48; i++)
+    //                 CPU_SET(base_cpu + i, &cpuset);
+    //             sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+    //             prod->cross_numa_cnt = 0;
+    //             // elog(LOG, "[STREAM-NUMA] tid=%d migrated back to home_numa=%d",
+    //             //      prod->worker_tid,
+    //             //      prod->home_numa);
+    //         }
+    //     }
+    // }
     if (sharedContext->vectorized) {
         VectorBatch* batchsrc = sharedContext->sharedBatches[u_sess->stream_cxt.smp_id][loc];
         VectorBatch* batchdst = ((VecStreamState*)node)->m_CurrentBatch;
@@ -549,68 +610,11 @@ bool gs_consume_memory_data(StreamState* node, int loc)
 
         batchdst->Copy<true, false>(batchsrc);
 
-        // /*===========================================================
-        // ⚠️ 先暂停计时：进入 NUMA 采样前记录时间
-        // ===========================================================*/
-        // gettimeofday(&numa_start, NULL);
-
-        // /* ================= NUMA 采样开始 ================= */
-
-        // 获取目标 CPU/NUMA
-        // int dst_cpu  = sched_getcpu();
-        // int dst_numa = cpu_to_numa_node(dst_cpu);
-
-        // // 获取生产端 CPU/NUMA
-        // int src_cpu  = batchsrc->producer_cpu;
-        // int src_numa = batchsrc->producer_numa;  
-        // int src_pid   = batchsrc->producer_tid;
-
-        // /* 准备打印前几个列的列级 NUMA（避免日志太长） */
-        // int show_cols = batchsrc->m_cols;  
-        // StringInfoData tmp;
-        // initStringInfo(&tmp);
-        // for (int cc = 0; cc < show_cols; ++cc) {
-        //     int colnode = -1;
-        //     if (batchsrc->producer_col_numa) colnode = batchsrc->producer_col_numa[cc];
-        //     appendStringInfo(&tmp, "col%d_node=%d ", cc, colnode);
-        // }
-        // pid_t recvtid = syscall(SYS_gettid);
-        // elog(LOG,
-        //      "[BatchPath] PROTID=%d RECVTID=%d smp=%d loc=%d src={cpu=%d numa=%d} dst={cpu=%d numa=%d} rows=%d cols=%d %s",
-        //      src_pid,
-        //      recvtid,
-        //      u_sess->stream_cxt.smp_id, loc,
-        //      src_cpu, src_numa,
-        //      dst_cpu, dst_numa,
-        //      batchsrc->m_rows, batchsrc->m_cols,
-        //      tmp.data);
-    //     elog(LOG,
-    //  "[BatchPath] smp=%d loc=%d src={cpu=%d numa=%d} dst={cpu=%d numa=%d} rows=%d cols=%d %s sizeof(ScalarValue)=%zu",
-    //  u_sess->stream_cxt.smp_id, loc,
-    //  src_cpu, src_numa,
-    //  dst_cpu, dst_numa,
-    //  batchsrc->m_rows, batchsrc->m_cols,
-    //  tmp.data,
-    //  sizeof(ScalarValue));
-
-        // if (tmp.data) pfree(tmp.data);
-
-        // /* ================= NUMA 采样结束 ================= */
-
-        // /*===========================================================
-        // ⚠️ 恢复计时：减掉 NUMA 采样耗时
-        // ===========================================================*/
-        // gettimeofday(&numa_end, NULL);
-
-        // /* 重新设置 copy_start，使 NUMA 时间不计入 copy 的测量 */
-        // copy_start.tv_sec  += (numa_end.tv_sec  - numa_start.tv_sec);
-        // copy_start.tv_usec += (numa_end.tv_usec - numa_start.tv_usec);
-        /*===========================================================*/
-
-        /* 只有 VectorBatch 模式才计算 bytes */
-        // bytes = batchdst->m_rows * batchdst->m_cols * sizeof(ScalarValue);
-
         batchsrc->Reset();
+    //         if (op != NULL && my_numa >= 0) {
+    //     pg_atomic_fetch_sub_u32(&op->active_threads, 1);
+    //     pg_atomic_fetch_sub_u32(&op->active_per_numa[my_numa], 1);
+    // }
     } else {
         TupleVector* tuplesrc = sharedContext->sharedTuples[u_sess->stream_cxt.smp_id][loc];
         TupleVector* tupledst = node->tempTupleVec;
@@ -649,8 +653,10 @@ bool gs_consume_memory_data(StreamState* node, int loc)
 
     /* send signal */
     entry->_signal();
+    // switch_to_initial_cpu2();
 
     node->sharedContext->scanLoc[u_sess->stream_cxt.smp_id] = loc;
+
     return true;
 }
 
@@ -664,6 +670,7 @@ bool gs_consume_memory_data(StreamState* node, int loc)
  */
 char gs_find_memory_data(StreamState* node, int* waitnode_count)
 {
+    // switch_to_initial_cpu2();
     DataStatus dataStatus;
     StringInfo buf = NULL;
     int scanLoc = node->sharedContext->scanLoc[u_sess->stream_cxt.smp_id];

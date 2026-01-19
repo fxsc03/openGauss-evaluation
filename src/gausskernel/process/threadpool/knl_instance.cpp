@@ -57,6 +57,7 @@
 #include "access/htap/imcs_ctlg.h"
 #endif
 
+
 const int SIZE_OF_TWO_UINT64 = 16;
 
 knl_instance_context g_instance;
@@ -101,6 +102,381 @@ static void knl_g_counters_init(knl_g_counters_context* counters_cxt)
     counters_cxt->g_recv_num = 0;
     counters_cxt->g_comm_send_timeout = 0;
 }
+
+// 最简单的版本：有密度限制的聚集
+// int choose_numa_for_operator(int planNodeId)
+// {
+//     int n;
+//     int primary = -1;
+//     int dop = u_sess->stream_cxt.producer_dop;
+//     OperatorNUMAState *op = &g_instance.operator_numa_table[planNodeId];
+    
+//     /* ---- 1. 检查现有相同算子的分布 ---- */
+//     int same_op_on_numa[MAX_NUMA_NODES] = {0};
+    
+//     for (int i = 0; i < MAX_OPERATORS; i++) {
+//         OperatorNUMAState *other = &g_instance.operator_numa_table[i];
+//         if (!other->initialized || other->planNodeId != planNodeId) continue;
+        
+//         for (n = 0; n < MAX_NUMA_NODES; n++) {
+//             same_op_on_numa[n] += pg_atomic_read_u32(&other->active_per_numa[n]);
+//         }
+//     }
+    
+//     /* ---- 2. 选择NUMA：优先聚集，但有密度限制 ---- */
+//     int density_threshold = CORES_PER_NUMA * 60 / 100; // 70%密度阈值
+    
+//     for (n = 0; n < MAX_NUMA_NODES; n++) {
+//         if (same_op_on_numa[n] > 0 && same_op_on_numa[n] < density_threshold) {
+//             primary = n;  // 使用已有算子的NUMA，但前提是不超过阈值
+//             // elog(WARNING, "Aggregating on NUMA %d (existing=%d, threshold=%d)",
+//             //      n, same_op_on_numa[n], density_threshold);
+//             break;
+//         }
+//     }
+    
+//     /* ---- 3. 如果超过阈值或没有相同算子，选择负载最轻的NUMA ---- */
+//     if (primary < 0) {
+//         int min_load = INT_MAX;
+//         for (n = 0; n < MAX_NUMA_NODES; n++) {
+//             int load = g_instance.ioi_ctrl.numa_total_threads[n];
+//             if (load < min_load) {
+//                 min_load = load;
+//                 primary = n;
+//             }
+//         }
+//         // elog(WARNING, "No suitable NUMA for aggregation, using least loaded: %d", primary);
+//     }
+    
+//     /* ---- 4. 分配线程 ---- */
+//     // ... 分配逻辑，确保不超过密度阈值 ...
+    
+//     return primary;
+// }
+
+
+void bind_thread_to_numa(int numa)
+{
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+
+    switch (numa) {
+        case 0:
+            for (int i = 0; i <= 23; i++) CPU_SET(i, &cpuset);
+            for (int i = 96; i <= 119; i++) CPU_SET(i, &cpuset);
+            break;
+        case 1:
+            for (int i = 24; i <= 47; i++) CPU_SET(i, &cpuset);
+            for (int i = 120; i <= 143; i++) CPU_SET(i, &cpuset);
+            break;
+        case 2:
+            for (int i = 48; i <= 71; i++) CPU_SET(i, &cpuset);
+            for (int i = 144; i <= 167; i++) CPU_SET(i, &cpuset);
+            break;
+        case 3:
+            for (int i = 72; i <= 95; i++) CPU_SET(i, &cpuset);
+            for (int i = 168; i <= 191; i++) CPU_SET(i, &cpuset);
+            break;
+        default:
+            return;
+    }
+
+    (void)sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+}
+
+void bind_thread_to_numa_with_drift(int numa, int dop)
+{
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+
+    // 根据DOP决定是否允许飘逸
+    int allow_drift = (dop > CORES_PER_NUMA); // DOP大于一个NUMA容量时才允许飘逸
+    
+    switch (numa) {
+        case 0:
+            // NUMA 0的核心
+            for (int i = 0; i <= 23; i++) CPU_SET(i, &cpuset);
+            for (int i = 96; i <= 119; i++) CPU_SET(i, &cpuset);
+            
+            if (allow_drift) {
+                // 允许飘逸到NUMA 1
+                for (int i = 24; i <= 27; i++) CPU_SET(i, &cpuset);  // NUMA 1的前4个核心
+                for (int i = 120; i <= 123; i++) CPU_SET(i, &cpuset);
+            }
+            break;
+            
+        case 1:
+            // NUMA 1的核心
+            for (int i = 24; i <= 47; i++) CPU_SET(i, &cpuset);
+            for (int i = 120; i <= 143; i++) CPU_SET(i, &cpuset);
+            
+            if (allow_drift) {
+                // 允许飘逸到NUMA 0和2
+                for (int i = 20; i <= 23; i++) CPU_SET(i, &cpuset);  // NUMA 0的后4个核心
+                for (int i = 116; i <= 119; i++) CPU_SET(i, &cpuset);
+                
+                for (int i = 48; i <= 51; i++) CPU_SET(i, &cpuset);  // NUMA 2的前4个核心
+                for (int i = 144; i <= 147; i++) CPU_SET(i, &cpuset);
+            }
+            break;
+            
+        case 2:
+            // NUMA 2的核心
+            for (int i = 48; i <= 71; i++) CPU_SET(i, &cpuset);
+            for (int i = 144; i <= 167; i++) CPU_SET(i, &cpuset);
+            
+            if (allow_drift) {
+                // 允许飘逸到NUMA 1和3
+                for (int i = 44; i <= 47; i++) CPU_SET(i, &cpuset);  // NUMA 1的后4个核心
+                for (int i = 140; i <= 143; i++) CPU_SET(i, &cpuset);
+                
+                for (int i = 72; i <= 75; i++) CPU_SET(i, &cpuset);  // NUMA 3的前4个核心
+                for (int i = 168; i <= 171; i++) CPU_SET(i, &cpuset);
+            }
+            break;
+            
+        case 3:
+            // NUMA 3的核心
+            for (int i = 72; i <= 95; i++) CPU_SET(i, &cpuset);
+            for (int i = 168; i <= 191; i++) CPU_SET(i, &cpuset);
+            
+            if (allow_drift) {
+                // 允许飘逸到NUMA 2
+                for (int i = 68; i <= 71; i++) CPU_SET(i, &cpuset);  // NUMA 2的后4个核心
+                for (int i = 164; i <= 167; i++) CPU_SET(i, &cpuset);
+            }
+            break;
+            
+        default:
+            return;
+    }
+
+    (void)sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+}
+
+
+int pick_worker_numa(OperatorNUMAState *op)
+{
+    int n;
+    int best = op->primary_numa;
+    double best_ratio = 1e9;
+
+    for (n = 0; n < MAX_NUMA_NODES; n++) {
+        if (!(op->numa_mask & (1 << n)))
+            continue;
+
+        int target = op->threads_per_numa[n];
+        if (target == 0)
+            continue;
+
+        int used = pg_atomic_read_u32(&op->active_per_numa[n]);
+
+        double ratio = (double)used / (double)target;
+
+        if (ratio < best_ratio) {
+            best_ratio = ratio;
+            best = n;
+        }
+    }
+    // elog(LOG, "ioi rank =%d", best_ratio);
+
+    return best;
+}
+
+int choose_numa_for_operator(int planNodeId)
+{
+    OperatorNUMAState *op =
+        &g_instance.operator_numa_table[planNodeId];
+
+    int best_numa  = -1;
+    float best_score = 1e30f;
+
+    const float ALPHA = 1.0f;   /* IOI weight */
+    const float BETA  = -0.5f;  /* locality bonus */
+    const float GAMMA = 2.0f;   /* migration penalty */
+
+    for (int n = 0; n < MAX_NUMA_NODES; n++) {
+
+        float score = 0.0f;
+
+        /* ① 全局竞争度（越小越好） */
+        score += ALPHA * g_instance.ioi_ctrl.ioi[n];
+
+        /* ② operator 对该 NUMA 的历史亲和 */
+        uint32 presence =
+            pg_atomic_read_u32(&op->active_per_numa[n]);
+
+        if (presence > 0) {
+            score += BETA * (float)presence;
+        }
+
+        /* ③ 迁移惩罚：非当前 NUMA */
+        if (op->last_bound_numa >= 0 &&
+            n != op->last_bound_numa) {
+            score += GAMMA;
+        }
+
+        if (score < best_score) {
+            best_score = score;
+            best_numa  = n;
+        }
+    }
+
+    /* fallback */
+    if (best_numa < 0)
+        best_numa = op->last_bound_numa >= 0
+                        ? op->last_bound_numa
+                        : 0;
+
+    return best_numa;
+}
+
+void update_ioi_concurrent_debug(void)
+{
+    int i, n;
+
+    /* === [L0] 函数入口确认 === */
+    elog(LOG, ">>> update_ioi_concurrent ENTER <<<");
+
+    for (n = 0; n < MAX_NUMA_NODES; n++) {
+        g_instance.ioi_ctrl.numa_dom_threads[n]   = 0;
+        g_instance.ioi_ctrl.numa_total_threads[n] = 0;
+        g_instance.ioi_ctrl.ioi[n] = 0.0f;
+    }
+
+    int initialized_ops = 0;
+    int total_active_seen = 0;
+
+    for (i = 0; i < MAX_OPERATORS; i++) {
+        OperatorNUMAState *op =
+            &g_instance.operator_numa_table[i];
+
+        if (!op->initialized)
+            continue;
+
+        initialized_ops++;
+
+        /* === [L1] operator 被扫描到了 === */
+        // elog(LOG,
+            //  "IOI scan op[%d]: planNodeId=%d",
+            //  i, op->planNodeId);
+
+        for (n = 0; n < MAX_NUMA_NODES; n++) {
+
+            uint32 active_n =
+                pg_atomic_read_u32(&op->active_per_numa[n]);
+
+            /* === [L2] NUMA 级别 active 可见性 === */
+            // elog(LOG,
+            //      "  op[%d] numa[%d] active=%u",
+            //      i, n, active_n);
+
+            if (active_n == 0)
+                continue;
+
+            // total_active_seen += active_n;
+
+            g_instance.ioi_ctrl.numa_total_threads[n] += active_n;
+
+            if ((int)active_n >
+                g_instance.ioi_ctrl.numa_dom_threads[n]) {
+                g_instance.ioi_ctrl.numa_dom_threads[n] = active_n;
+            }
+        }
+    }
+
+    /* === [L3] 汇总可见性 === */
+    // elog(LOG,
+    //      "IOI summary: initialized_ops=%d total_active_seen=%d",
+    //      initialized_ops, total_active_seen);
+
+    for (n = 0; n < MAX_NUMA_NODES; n++) {
+        int total = g_instance.ioi_ctrl.numa_total_threads[n];
+        int dom   = g_instance.ioi_ctrl.numa_dom_threads[n];
+
+        if (total > 0) {
+            g_instance.ioi_ctrl.ioi[n] =
+                1.0f - ((float)dom / (float)total);
+        } else {
+            g_instance.ioi_ctrl.ioi[n] = 0.0f;
+        }
+
+        /* === [L4] 最终 IOI === */
+        elog(LOG,
+             "IOI[%d]: total=%d dom=%d IOI=%f",
+             n, total, dom, g_instance.ioi_ctrl.ioi[n]);
+    }
+
+    elog(LOG, "<<< update_ioi_concurrent EXIT >>>");
+}
+
+void update_ioi_concurrent(void)
+{
+    int i, n;
+    
+    // elog(WARNING, "=== update_ioi_concurrent START ===");
+
+    /* reset */
+    for (n = 0; n < MAX_NUMA_NODES; n++) {
+        g_instance.ioi_ctrl.numa_dom_threads[n] = 0;
+        g_instance.ioi_ctrl.numa_total_threads[n] = 0;
+        g_instance.ioi_ctrl.ioi[n] = 0.0f;
+    }
+
+    /*
+     * per NUMA statistics
+     */
+    
+    for (i = 0; i < MAX_OPERATORS; i++) {
+        OperatorNUMAState *op = &g_instance.operator_numa_table[i];
+
+        if (!op->initialized)
+            continue;
+            
+        for (n = 0; n < MAX_NUMA_NODES; n++) {
+            // 检查是否在mask中
+            bool in_mask = (op->numa_mask & (1 << n)) != 0;
+            
+            uint32 active_n = pg_atomic_read_u32(&op->active_per_numa[n]);
+                 
+            /* total threads on this NUMA */
+            g_instance.ioi_ctrl.numa_total_threads[n] += active_n;
+
+            /* dominant operator threads */
+            if ((int)active_n > g_instance.ioi_ctrl.numa_dom_threads[n]) {
+                g_instance.ioi_ctrl.numa_dom_threads[n] = active_n;
+                // elog(WARNING, "    New dominant for NUMA[%d]: %u threads (op=%d)", 
+                //      n, active_n, op->planNodeId);
+            }
+        }
+    }
+    
+
+    /*
+     * IOI = 1 - p_max
+     */
+    // elog(WARNING, "=== Calculating IOI ===");
+    for (n = 0; n < MAX_NUMA_NODES; n++) {
+        int total = g_instance.ioi_ctrl.numa_total_threads[n];
+        int dom   = g_instance.ioi_ctrl.numa_dom_threads[n];
+
+        // elog(WARNING, "NUMA[%d]: total_threads=%d, dominant_threads=%d", 
+        //      n, total, dom);
+
+        if (total > 0) {
+            float ratio = (float)dom / (float)total;
+            g_instance.ioi_ctrl.ioi[n] = 1.0f - ratio;
+            // elog(WARNING, "  IOI[%d] = 1 - (%d/%d) = 1 - %f = %f", 
+            //      n, dom, total, ratio, g_instance.ioi_ctrl.ioi[n]);
+        } else {
+            g_instance.ioi_ctrl.ioi[n] = 0.0f;
+        }
+    }
+    
+    // elog(WARNING, "=== update_ioi_concurrent END ===");
+}
+
+
 
 static void knl_g_ckpt_init(knl_g_ckpt_context* ckpt_cxt)
 {
