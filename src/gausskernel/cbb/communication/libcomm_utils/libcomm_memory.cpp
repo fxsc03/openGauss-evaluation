@@ -291,6 +291,7 @@ void gs_memory_send(
     u_sess->stream_cxt.producer_obj->m_sendMonitor) {
     u_sess->stream_cxt.producer_obj->m_sendMonitor->AddSendStat(bytes, elapsed);
     }
+    // Plan* plan = planstate->plan;
     // u_sess->stream_cxt.trace_cache_obj->stop();
     StreamTimeCopyEnd(t_thrd.pgxc_cxt.GlobalNetInstr);
     //每个batch都要先加锁，确保对信号量状态的修改和线程等待计数的操作是原子安全的。if (waiting_count > 0) { LIBCOMM_PTHREAD_COND_SIGNAL(&cond); }：如果有线程正在等待该信号量（waiting_count 记录等待线程数），则通过条件变量 cond 唤醒其中一个等待线程，让它可以继续执行（获取信号量）。最后解锁，允许其他线程操作信号量。
@@ -392,6 +393,44 @@ bool gs_consume_memory_data(StreamState* node, int loc)
         if (batchsrc->m_rows == 0) {
             return false;
         }
+        /* ---------------- consumer NUMA convergence ---------------- */
+
+        static __thread bool consumer_numa_bound = false;
+
+        int plan_id = node->ss.ps.plan->plan_node_id + 1;
+
+        if (!consumer_numa_bound &&
+            plan_id == (int)pg_atomic_read_u32(&g_instance.dominant_plan_id)) {
+
+            int target_numa = u_sess->stream_cxt.producer_obj->preferred_numa;
+
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+
+            if (target_numa == 0) {
+                for (int c = 0; c <= 23; c++)   CPU_SET(c, &cpuset);
+                for (int c = 96; c <= 119; c++) CPU_SET(c, &cpuset);
+            } else if (target_numa == 1) {
+                for (int c = 24; c <= 47; c++)  CPU_SET(c, &cpuset);
+                for (int c = 120; c <= 143; c++) CPU_SET(c, &cpuset);
+            } else if (target_numa == 2) {
+                for (int c = 48; c <= 71; c++)  CPU_SET(c, &cpuset);
+                for (int c = 144; c <= 167; c++) CPU_SET(c, &cpuset);
+            } else {
+                for (int c = 72; c <= 95; c++)  CPU_SET(c, &cpuset);
+                for (int c = 168; c <= 191; c++) CPU_SET(c, &cpuset);
+            }
+
+            sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+
+            consumer_numa_bound = true;
+
+            // elog(LOG,
+            //     "[NUMA][ConsumerBind] plan=%d smp=%d target_numa=%d",
+            //     plan_id,
+            //     u_sess->stream_cxt.smp_id,
+            //     target_numa);
+        }
 
         batchdst->Copy<true, false>(batchsrc);
 
@@ -409,7 +448,22 @@ bool gs_consume_memory_data(StreamState* node, int loc)
         /*
         可以把他们放到stream线程里，NUMA对NUMA这样，在析构函数里输出
         */
+        StreamProducer* prod = u_sess->stream_cxt.producer_obj;
+         size_t bytes = GetVectorBatchDataSize(batchsrc);
+        if (prod) {
+            if (src_numa == dst_numa)
+                prod->local_bytes  += bytes;
+            else
+                prod->remote_bytes += bytes;
 
+        }
+        /* ---------------- NUMA: convergence logic ---------------- */
+        // if (g_numa_mode == NUMA_PRODUCER_CONSUMER && prod) {
+
+            /* Case 1: not converged yet */
+           
+
+        // }
         // elog(LOG,
         //     "[BatchPath] smp=%d loc=%d "
         //     "src={cpu=%d numa=%d} -> dst={cpu=%d numa=%d} rows=%d",
@@ -418,7 +472,7 @@ bool gs_consume_memory_data(StreamState* node, int loc)
         //     dst_cpu, dst_numa,
         //     batchsrc->m_rows);
 
-        size_t bytes = GetVectorBatchDataSize(batchsrc);
+       
         
         // elog(LOG, "remote_memory_KB=%lu, local_memory_KB=%lu, total_bytes=%lu", remote_memory_KB, local_memory_KB, total_bytes);
         // total_bytes += bytes;
@@ -432,7 +486,7 @@ bool gs_consume_memory_data(StreamState* node, int loc)
         //        plan_node_id, src_cpu, src_numa, dst_cpu, dst_numa, bytes);
         // printf("remote_memory_KB=%lu, local_memory_KB=%lu, total_bytes=%lu\n", remote_memory_KB, local_memory_KB, total_bytes);
         // printf("bytes=%lu, src_numa=%d, dst_numa=%d\n", bytes, src_numa, dst_numa);
-        u_sess->stream_cxt.producer_obj->m_sendMonitor->AddConsumeStat(bytes, src_numa, dst_numa);
+            u_sess->stream_cxt.producer_obj->m_sendMonitor->AddConsumeStat(bytes, src_numa, dst_numa);
         }
 
 

@@ -1421,7 +1421,8 @@ typedef struct knl_instance_context {
     volatile int status;
     DemoteMode demotion;
     bool fatal_error;
-
+    pg_atomic_uint64 dominant_plan_score;
+    pg_atomic_uint32 dominant_plan_id;
     bool WalSegmentArchSucceed;
 
     /*

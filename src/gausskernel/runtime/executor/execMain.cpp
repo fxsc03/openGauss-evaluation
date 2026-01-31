@@ -2431,6 +2431,56 @@ static void ExecuteVectorizedPlan(EState *estate, PlanState *planstate, CmdType 
     VectorBatch *batch = NULL;
     long current_tuple_count;
     bool stream_instrument = false;
+    /* ---------------- NUMA: inter-operator data copy opt---------------- */
+    // Plan* plan = planstate->plan;
+    // int plan_id = plan->plan_node_id;
+    // double est_rows = plan->plan_rows;
+
+    // uint64 old_score =
+    //     pg_atomic_read_u64(&g_instance.dominant_plan_score);
+
+    // if (est_rows > old_score) {
+    //     pg_atomic_write_u64(&g_instance.dominant_plan_score, est_rows);
+    //     pg_atomic_write_u32(&g_instance.dominant_plan_id, plan_id);
+    // }
+
+    // if (
+    //     plan_id == g_instance.dominant_plan_id) {
+
+    //     int smp = u_sess->stream_cxt.smp_id;
+    //     int target_numa;
+
+    //     if (smp < 48)
+    //         target_numa = 0;
+    //     else if (smp < 96)
+    //         target_numa = 1;
+    //     else if (smp < 128)
+    //         target_numa = 2;
+    //     else
+    //         target_numa = 3;
+
+    //     cpu_set_t cpuset;
+    //     CPU_ZERO(&cpuset);
+
+    //     if (target_numa == 0) {
+    //         for (int c = 0; c <= 23; c++)   CPU_SET(c, &cpuset);
+    //         for (int c = 96; c <= 119; c++) CPU_SET(c, &cpuset);
+    //     } else if (target_numa == 1) {
+    //         for (int c = 24; c <= 47; c++)   CPU_SET(c, &cpuset);
+    //         for (int c = 120; c <= 143; c++) CPU_SET(c, &cpuset);
+    //     } else if (target_numa == 2) {
+    //         for (int c = 48; c <= 71; c++)   CPU_SET(c, &cpuset);
+    //         for (int c = 144; c <= 167; c++) CPU_SET(c, &cpuset);
+    //     } else {
+    //         for (int c = 72; c <= 95; c++)   CPU_SET(c, &cpuset);
+    //         for (int c = 168; c <= 191; c++) CPU_SET(c, &cpuset);
+    //     }
+
+    //     sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+    //     u_sess->stream_cxt.producer_obj->preferred_numa = target_numa;
+    // }
+
+
 
     /*
      * initialize local variables
@@ -2502,7 +2552,38 @@ static void ExecuteVectorizedPlan(EState *estate, PlanState *planstate, CmdType 
          */
         if (sendTuples && !u_sess->exec_cxt.executorStopFlag) {
             (*dest->sendBatch)(batch, dest);
+            //
+            Plan* plan = planstate->plan;
+            int plan_id = plan->plan_node_id;
+            double est_rows = plan->plan_rows * plan->plan_width;
+
+            uint64 old_score =
+            pg_atomic_read_u64(&g_instance.dominant_plan_score);
+
+            if (est_rows > old_score) {
+                pg_atomic_write_u64(&g_instance.dominant_plan_score, est_rows);
+                pg_atomic_write_u32(&g_instance.dominant_plan_id, plan_id);
+            }
+                if (
+                plan_id == g_instance.dominant_plan_id) {
+
+                int smp = u_sess->stream_cxt.smp_id;
+                int target_numa;
+
+                if (smp < 48)
+                    target_numa = 0;
+                else if (smp < 96)
+                    target_numa = 1;
+                else if (smp < 128)
+                    target_numa = 2;
+                else
+                    target_numa = 3;
+                u_sess->stream_cxt.producer_obj->preferred_numa = target_numa;
+    }
+
+            
         }
+
 
         t_thrd.pgxc_cxt.GlobalNetInstr = NULL;
 

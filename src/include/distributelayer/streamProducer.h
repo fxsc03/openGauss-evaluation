@@ -208,7 +208,12 @@ private:
 class StreamProducer : public StreamObj {
 public:
     StreamSendMonitor* m_sendMonitor;
+    int  preferred_numa;      // -1 表示未确定
+    uint64 local_bytes;
+    uint64 remote_bytes;
+    uint64 remote_bytes_per_numa[4];
 
+    uint64 layer_batches;   /* optional: batch counter */
     StreamProducer(StreamKey key, PlannedStmt* pstmt, Stream* streamNode, MemoryContext context, int socketNum,
         StreamTransType type);
 
