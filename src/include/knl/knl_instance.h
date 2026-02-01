@@ -109,13 +109,12 @@ const int MAX_AUDIT_NUM = 48;
 const int DB_CMPT_MAX = 5;
 #endif
 
-//我自己加的开始
+
 #ifdef __USE_NUMA
 extern "C" {
 #include <numa.h>
 }
 #endif
-//我自己加的结束
 
 enum knl_virtual_role {
     VUNKNOWN = 0,
@@ -1432,21 +1431,7 @@ typedef struct {
     int dop; 
 } IOICtrl;
 
-// typedef struct OperatorNUMAState {
-//     int planNodeId;
-//     int dop;
 
-//     int primary_numa;
-//     uint8 numa_mask;
-//     bool in_active_window;
-//     int threads_per_numa[MAX_NUMA_NODES];
-
-//     pg_atomic_uint32 active_threads;
-//     pg_atomic_uint32 active_per_numa[MAX_NUMA_NODES];  // ⭐ 新增
-//     uint32 batch_since_bind;
-//     int    last_bound_numa;
-//     bool initialized;
-// } OperatorNUMAState;
 typedef struct OperatorNUMAState {
     int planNodeId;
     int dop;
@@ -1461,13 +1446,13 @@ typedef struct OperatorNUMAState {
         __attribute__((aligned(64)));
 
     /* ===== batch / epoch 控制 ===== */
-    uint32 batch_since_bind;          /* 你已有：epoch 内 batch 计数 */
+    uint32 batch_since_bind;         
 
-    uint32 batches_since_migration;   /* ⭐ 新增：距离上次迁移的 batch 数 */
+    uint32 batches_since_migration;   
 
-    int    last_bound_numa;            /* 你已有 */
+    int    last_bound_numa;           
     // bool   initialized;
-    pg_atomic_uint32 initialized;   // ✅ 原子
+    pg_atomic_uint32 initialized;  
 
     uint32 last_active_snapshot[MAX_NUMA_NODES];
 } OperatorNUMAState;
@@ -1649,7 +1634,7 @@ typedef struct knl_instance_context {
 
     
 } knl_instance_context;
-
+	//providing ioi api
 extern long random();
 extern void knl_instance_init();
 extern int choose_numa_for_operator(int nodeid);
