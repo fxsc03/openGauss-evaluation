@@ -1,4 +1,4 @@
-# Inter-Operator Interaction Matters: Revisiting Query Scalability of Vectorized OLAP Engines on Many-Core NUMA Servers
+# Revisiting Query Scalability of Vectorized OLAP Engines on Many-Core NUMA Servers
 
 This repository contains the source code and experimental scripts for the paper **"Inter-Operator Interaction Matters: Revisiting Query Scalability of Vectorized OLAP Engines on Many-Core NUMA Servers"**.
 
