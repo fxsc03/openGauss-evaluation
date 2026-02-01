@@ -1,0 +1,40 @@
+From ac69dca9383a7e9a00e7eb37359a117bb5ccb8d2 Mon Sep 17 00:00:00 2001
+From: songsihui <song.sihui@foxmail.com>
+Date: Wed, 12 Nov 2025 19:00:09 +0800
+Subject: [PATCH 1/4] update build results and scripts
+
+---
+ src/gausskernel/process/stream/streamProducer.cpp | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/src/gausskernel/process/stream/streamProducer.cpp b/src/gausskernel/process/stream/streamProducer.cpp
+index 791e2dc..0a26f6f 100755
+--- a/src/gausskernel/process/stream/streamProducer.cpp
++++ b/src/gausskernel/process/stream/streamProducer.cpp
+@@ -168,7 +168,7 @@ StreamProducer::StreamProducer(
+     rc = memcpy_s(m_plan, sizeof(PlannedStmt), pstmt, sizeof(PlannedStmt));
+     securec_check(rc, "\0", "\0");
+ 
+-    m_sendMonitor = new StreamSendMonitor("StreamProducer");
++    //m_sendMonitor = new StreamSendMonitor("StreamProducer");
+ }
+ 
+ StreamProducer::~StreamProducer()
+@@ -195,10 +195,10 @@ StreamProducer::~StreamProducer()
+     m_distributeIdx = NULL;
+     m_skewState = NULL;
+     
+-    if (m_sendMonitor) {
+-        delete m_sendMonitor;
+-        m_sendMonitor = NULL;
+-    }
++    // if (m_sendMonitor) {
++    //     delete m_sendMonitor;
++    //     m_sendMonitor = NULL;
++    // }
+ }
+ 
+ /*
+-- 
+1.8.3.1
+

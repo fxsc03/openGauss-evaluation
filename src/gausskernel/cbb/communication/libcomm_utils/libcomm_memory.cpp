@@ -20,6 +20,8 @@
  *
  * -------------------------------------------------------------------------
  */
+#include <numa.h>
+#include <numaif.h>
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
@@ -69,6 +71,142 @@
 #define STREAM_SCAN_FINISH 'F'
 #define STREAM_SCAN_WAIT 'W'
 #define STREAM_SCAN_DATA 'D'
+
+// /* 返回 >=0 节点号，返回 -1 表示未知/失败 */
+// static int query_memory_numa_node(void *addr, size_t len)
+// {
+//     if (addr == NULL || len == 0) return -1;
+
+//     long page_size = sysconf(_SC_PAGESIZE);
+//     if (page_size <= 0) return -1;
+
+//     unsigned long start = (unsigned long)addr;
+//     unsigned long end = start + len - 1;
+//     unsigned long first_page = start & ~(page_size - 1);
+//     unsigned long last_page  = end   & ~(page_size - 1);
+
+//     unsigned long npages = (last_page - first_page) / page_size + 1;
+//     if (npages == 0) return -1;
+
+//     /* 限制采样页数，避免开销过大 */
+//     unsigned long max_sample = 16;
+//     unsigned long step = 1;
+//     if (npages > max_sample) step = npages / max_sample;
+
+//     unsigned long alloc_pages = (npages + step - 1) / step;
+//     if (alloc_pages == 0) return -1;
+
+//     void **pages = (void**)malloc(sizeof(void*) * alloc_pages);
+//     int *status   = (int*) malloc(sizeof(int) * alloc_pages);
+//     if (!pages || !status) { free(pages); free(status); return -1; }
+//     memset(status, 0, sizeof(int) * alloc_pages);
+
+//     unsigned long idx = 0;
+//     for (unsigned long p = 0; p < npages && idx < alloc_pages; p += step) {
+//         unsigned long off = first_page + p * page_size;
+//         pages[idx++] = (void*)off;
+//     }
+
+//     /* syscall: pid=0 (self). nodes=NULL -> will fill status[] with node id or negative err. */
+//     long rc = syscall(SYS_move_pages, 0, (long)idx, pages, NULL, status, 0);
+//     int result = -1;
+//     if (rc == 0) {
+//         /* 统计众数 */
+//         int counts[128];
+//         memset(counts, 0, sizeof(counts));
+//         int maxnode = -1, maxcnt = 0;
+//         for (unsigned long i = 0; i < idx; ++i) {
+//             if (status[i] >= 0 && status[i] < (int)(sizeof(counts)/sizeof(counts[0]))) {
+//                 counts[status[i]]++;
+//                 if (counts[status[i]] > maxcnt) {
+//                     maxcnt = counts[status[i]];
+//                     maxnode = status[i];
+//                 }
+//             }
+//         }
+//         if (maxnode >= 0) result = maxnode;
+//         else result = -1;
+//     } else {
+//         /* move_pages 失败（权限/内核限制等），返回 -1 */
+//         result = -1;
+//     }
+
+//     free(pages);
+//     free(status);
+//     return result;
+// }
+
+static int query_memory_numa_node(void *addr, size_t len)
+{
+    if (addr == NULL || len == 0)
+        return -1;
+
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0)
+        return -1;
+
+    unsigned long start = (unsigned long)addr;
+    unsigned long end = start + len - 1;
+
+    // 页对齐
+    unsigned long first_page = start & ~(page_size - 1);
+    unsigned long last_page  = end   & ~(page_size - 1);
+
+    // 总页数
+    unsigned long npages = (last_page - first_page) / page_size + 1;
+    if (npages == 0)
+        return -1;
+
+    // 分配 pages 和 status 数组
+    void **pages = (void**)malloc(sizeof(void*) * npages);
+    int  *status = (int*) malloc(sizeof(int) * npages);
+
+    if (!pages || !status) {
+        free(pages);
+        free(status);
+        return -1;
+    }
+
+    memset(status, 0, sizeof(int) * npages);
+
+    // 逐页填充
+    for (unsigned long i = 0; i < npages; ++i) {
+        pages[i] = (void*)(first_page + i * page_size);
+    }
+
+    // move_pages 查询
+    long rc = syscall(SYS_move_pages, 0, (long)npages,
+                      pages, NULL, status, 0);
+
+    int result = -1;
+
+    if (rc == 0) {
+        // 统计众数（哪个 NUMA node 出现次数最多）
+        int counts[128];
+        memset(counts, 0, sizeof(counts));
+
+        int maxnode = -1, maxcnt = 0;
+
+        for (unsigned long i = 0; i < npages; ++i) {
+            if (status[i] >= 0 && status[i] < 128) {
+                counts[status[i]]++;
+
+                if (counts[status[i]] > maxcnt) {
+                    maxcnt = counts[status[i]];
+                    maxnode = status[i];
+                }
+            }
+        }
+
+        if (maxnode >= 0)
+            result = maxnode;
+    }
+
+    free(pages);
+    free(status);
+    return result;
+}
+
 
 extern bool executorEarlyStop();
 
@@ -180,6 +318,42 @@ bool gs_is_databuff_empty(StreamSharedContext* sharedContext, int nthChannel)
 }
 #endif
 
+// 消费者切核函数
+// 获取消费者的smp_id，并将当前线程绑定到与smp_id一致的cpuid上
+static bool switch_to_initial_cpu2(void)
+{
+    // 获取当前消费者的 smp_id
+    int consumer_smp_id = u_sess->stream_cxt.smp_id;
+    
+    if (consumer_smp_id < 0) {
+        return false;
+    }
+    
+    // 假设 smp_id 直接对应 cpuid（如果系统中有映射关系，需要相应调整）
+    int target_cpuid = consumer_smp_id;
+    
+    // 获取当前CPU
+    int current_cpuid = sched_getcpu();
+    
+    // 如果已经在正确的CPU上，无需切换
+    if (current_cpuid == target_cpuid) {
+        return true;
+    }
+    
+    // printf("switch to cpu %d\n", target_cpuid);
+
+    
+    // 设置CPU亲和性，切换到目标CPU
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(target_cpuid, &cpuset);
+    
+    int ret = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+    
+    return true;
+}
+
+
 /*
  * @Description: Send data to local consumer through shared memory
  *
@@ -203,11 +377,46 @@ void gs_memory_send(
         -1,
         u_sess->stream_cxt.producer_obj->getParentPlanNodeId(),
         global_node_definition ? global_node_definition->num_nodes : -1);
-    // struct timeval stream_start, stream_end;
-    // struct timeval copy_start, copy_end;
-    // gettimeofday(&stream_start, NULL);
     StreamTimeSendStart(t_thrd.pgxc_cxt.GlobalNetInstr);
     entry = sharedContext->quota_entrys[nthChannel][u_sess->stream_cxt.smp_id];
+
+    // StreamProducer* prod = u_sess->stream_cxt.producer_obj;
+    // if (prod != NULL) {
+    //     int planNodeId = prod->m_streamNode->scan.plan.plan_node_id;
+        // OperatorNUMAState *op = &g_instance.operator_numa_table[planNodeId];
+
+    //     if (op->batch_since_bind >= 256) {
+
+    //         /* 结束上一个窗口 */
+    //         if (op->in_active_window) {
+    //             pg_atomic_fetch_sub_u32(&op->active_threads, 1);
+    //             pg_atomic_fetch_sub_u32(&op->active_per_numa[op->last_bound_numa], 1);
+                // op->in_active_window = false;
+    //         }
+
+    //         /* 记录当前 NUMA（仅用于统计，不 bind） */
+    //         int cpu = sched_getcpu();
+    //         int my_numa = -1;
+    //         if (cpu <= 23 || (cpu >= 96  && cpu <= 119))
+    //             my_numa = 0;
+    //         else if (cpu <= 47 || (cpu >= 120 && cpu <= 143))
+    //             my_numa = 1;
+    //         else if (cpu <= 71 || (cpu >= 144 && cpu <= 167))
+    //             my_numa = 2;
+    //         else
+    //             my_numa = 3;
+    //         /* 打开新窗口 */
+    //         pg_atomic_fetch_add_u32(&op->active_threads, 1);
+    //         pg_atomic_fetch_add_u32(&op->active_per_numa[my_numa], 1);
+
+    //         op->last_bound_numa = my_numa;
+    //         op->batch_since_bind = 0;
+    //         op->in_active_window = true;
+    //     }
+
+    //     op->batch_since_bind++;
+    // }
+
     for (;;) {
         /* Check for interrupt at the beginning of the loop. */
         CHECK_FOR_INTERRUPTS();
@@ -237,34 +446,18 @@ void gs_memory_send(
     // gettimeofday(&stream_end, NULL);
     // gettimeofday(&copy_start, NULL);
     StreamTimeCopyStart(t_thrd.pgxc_cxt.GlobalNetInstr);
-    // u_sess->stream_cxt.trace_cache_obj->start(u_sess->stream_cxt.producer_obj->m_streamNode->scan.plan.plan_node_id);
-    struct timeval copy_start, copy_end;
-    gettimeofday(&copy_start, NULL);
     /* Copy data to shared context. */
     if (sharedContext->vectorized) {
         Assert(sharedContext->sharedBatches != NULL);
         batch = sharedContext->sharedBatches[nthChannel][u_sess->stream_cxt.smp_id];
-
-        // 当前线程 CPU
-        int src_cpu = sched_getcpu();
-        // 映射 NUMA
-        int src_numa = cpu_to_numa_node(src_cpu);
-
-        batch->producer_cpu  = src_cpu;
-        batch->producer_numa = src_numa;
-
         /* data copy */
         if (-1 == nthRow) {
             /* Do deep copy of all rows, for local roundrobin & local broadcast. */
             Assert(batch->m_rows == 0);
             batch->Copy<true, false>(batchsrc);
             ready_to_send = true;
-            sharedContext->processed_batches[nthChannel][u_sess->stream_cxt.smp_id]++;
-            sharedContext->processed_rows[nthChannel][u_sess->stream_cxt.smp_id] += batchsrc->m_rows;
         } else {
             batch->CopyNth(batchsrc, nthRow);
-            sharedContext->processed_batches[nthChannel][u_sess->stream_cxt.smp_id]++;
-            sharedContext->processed_rows[nthChannel][u_sess->stream_cxt.smp_id] += batchsrc->m_rows;
             if (BatchMaxSize == batch->m_rows) {
                 ready_to_send = true;
             }
@@ -294,9 +487,6 @@ void gs_memory_send(
     // Plan* plan = planstate->plan;
     // u_sess->stream_cxt.trace_cache_obj->stop();
     StreamTimeCopyEnd(t_thrd.pgxc_cxt.GlobalNetInstr);
-    //每个batch都要先加锁，确保对信号量状态的修改和线程等待计数的操作是原子安全的。if (waiting_count > 0) { LIBCOMM_PTHREAD_COND_SIGNAL(&cond); }：如果有线程正在等待该信号量（waiting_count 记录等待线程数），则通过条件变量 cond 唤醒其中一个等待线程，让它可以继续执行（获取信号量）。最后解锁，允许其他线程操作信号量。
-    //统计唤醒次数和唤醒开销
-    /* send the signal if copy finished */
     if (ready_to_send) {
 #ifdef __aarch64__
         pg_memory_barrier();
@@ -382,10 +572,85 @@ bool gs_return_tuple(StreamState* node)
  static size_t total_bytes = 0;
 bool gs_consume_memory_data(StreamState* node, int loc)
 {
+
+    // switch_to_initial_cpu2();
+
     StreamSharedContext* sharedContext = node->sharedContext;
 
     NetWorkTimeCopyStart(t_thrd.pgxc_cxt.GlobalNetInstr);
-    /* Take data from the shared context. */
+
+    // StreamProducer* prod = u_sess->stream_cxt.producer_obj;
+    // OperatorNUMAState *op = NULL;
+    // int my_numa = -1;
+
+    // if (prod != NULL) {
+    //     int planNodeId =
+    //         prod->m_streamNode->scan.plan.plan_node_id + 1;
+
+    //     OperatorNUMAState *op =
+    //         &g_instance.operator_numa_table[planNodeId];
+
+    //     /* ===== batch 计数 ===== */
+    //     op->batch_since_bind++;
+    //     op->batches_since_migration++;
+
+    //     /* ===== epoch 边界 ===== */
+    //     if (op->batch_since_bind >= BATCH_EPOCH) {       
+    //         op->batch_since_bind = 0;
+
+    //         /* ① 更新 IOI（epoch 粒度） */
+    //         update_ioi_concurrent();
+
+    //         int cur_numa = op->last_bound_numa;
+    //         int tgt_numa = choose_numa_for_operator(planNodeId);
+
+    //         if (tgt_numa != cur_numa) {
+
+    //             if (op->batches_since_migration >=
+    //                 MIN_BATCH_RESIDENCE) {
+
+    //                 bind_thread_to_numa_with_drift(
+    //                     tgt_numa, op->dop);
+
+    //                 // MemoryContextReset(op->exec_ctx);
+    //                 op->last_bound_numa = tgt_numa;
+    //                 op->batches_since_migration = 0;
+    //             }
+    //         }
+    //     }
+    // }
+
+    //for thread migration
+    // if (prod != NULL) {
+    //     int cpu_id = sched_getcpu();
+    //     int current_numa = -1;
+    //     // 精确计算 NUMA
+    //     if ((cpu_id >= 0 && cpu_id <= 23) || (cpu_id >= 96 && cpu_id <= 119))
+    //         current_numa = 0;
+    //     else if ((cpu_id >= 24 && cpu_id <= 47) || (cpu_id >= 120 && cpu_id <= 143))
+    //         current_numa = 1;
+    //     else if ((cpu_id >= 48 && cpu_id <= 71) || (cpu_id >= 144 && cpu_id <= 167))
+    //         current_numa = 2;
+    //     else if ((cpu_id >= 72 && cpu_id <= 95) || (cpu_id >= 168 && cpu_id <= 191))
+    //         current_numa = 3;
+    //     // 如果父节点不在 home_numa
+    //     if (unlikely(current_numa != prod->home_numa)) {
+    //         prod->cross_numa_cnt++;
+    //         // 每达到迁移预算就 bind 回 home NUMA
+    //         if (prod->cross_numa_cnt >= prod->MIGRATION_BUDGET) {
+    //             cpu_set_t cpuset;
+    //             CPU_ZERO(&cpuset);
+    //             int base_cpu = prod->home_numa * 48;
+    //             for (int i = 0; i < 48; i++)
+    //                 CPU_SET(base_cpu + i, &cpuset);
+    //             sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+    //             prod->cross_numa_cnt = 0;
+    //             // elog(LOG, "[STREAM-NUMA] tid=%d migrated back to home_numa=%d",
+    //             //      prod->worker_tid,
+    //             //      prod->home_numa);
+    //         }
+    //     }
+    // }
     if (sharedContext->vectorized) {
         VectorBatch* batchsrc = sharedContext->sharedBatches[u_sess->stream_cxt.smp_id][loc];
         VectorBatch* batchdst = ((VecStreamState*)node)->m_CurrentBatch;
@@ -493,6 +758,10 @@ bool gs_consume_memory_data(StreamState* node, int loc)
                 
 
         batchsrc->Reset();
+    //         if (op != NULL && my_numa >= 0) {
+    //     pg_atomic_fetch_sub_u32(&op->active_threads, 1);
+    //     pg_atomic_fetch_sub_u32(&op->active_per_numa[my_numa], 1);
+    // }
     } else {
         TupleVector* tuplesrc = sharedContext->sharedTuples[u_sess->stream_cxt.smp_id][loc];
         TupleVector* tupledst = node->tempTupleVec;
@@ -510,6 +779,14 @@ bool gs_consume_memory_data(StreamState* node, int loc)
         tuplesrc->tuplePointer = 0;
         (void)gs_return_tuple(node);
     }
+    // gettimeofday(&copy_end, NULL);
+    // double elapsed = (copy_end.tv_sec - copy_start.tv_sec) * 1e6 +
+    //                 (copy_end.tv_usec - copy_start.tv_usec);
+
+    // if (u_sess->stream_cxt.producer_obj &&
+    // u_sess->stream_cxt.producer_obj->m_recvMonitor) {
+    // u_sess->stream_cxt.producer_obj->m_recvMonitor->AddSendStat(bytes, elapsed);
+    // }
     NetWorkTimeCopyEnd(t_thrd.pgxc_cxt.GlobalNetInstr);
 
     struct hash_entry* entry = NULL;
@@ -523,8 +800,10 @@ bool gs_consume_memory_data(StreamState* node, int loc)
 
     /* send signal */
     entry->_signal();
+    // switch_to_initial_cpu2();
 
     node->sharedContext->scanLoc[u_sess->stream_cxt.smp_id] = loc;
+
     return true;
 }
 
@@ -538,6 +817,7 @@ bool gs_consume_memory_data(StreamState* node, int loc)
  */
 char gs_find_memory_data(StreamState* node, int* waitnode_count)
 {
+    // switch_to_initial_cpu2();
     DataStatus dataStatus;
     StringInfo buf = NULL;
     int scanLoc = node->sharedContext->scanLoc[u_sess->stream_cxt.smp_id];

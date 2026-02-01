@@ -311,7 +311,10 @@ VectorBatch* ExecCStoreScan(CStoreScanState* node)
 {
     VectorBatch* p_out_batch = NULL;
     VectorBatch* p_scan_batch = NULL;
-    // u_sess->stream_cxt.trace_cache_obj->start(node->ps.plan->plan_node_id);
+    // if (u_sess->stream_cxt.trace_cache_obj != NULL) {
+    //     u_sess->stream_cxt.trace_cache_obj->start(node->ps.plan->plan_node_id);
+    // }
+    
     // If we have runtime keys and they've not already been set up, do it now.
     //
     // evaluate the runtime key
@@ -385,6 +388,9 @@ restart:
         CHECK_FOR_INTERRUPTS();
         goto restart;
     }
+    // if (u_sess->stream_cxt.trace_cache_obj != NULL) {
+    //     u_sess->stream_cxt.trace_cache_obj->stop();
+    // }
     // u_sess->stream_cxt.trace_cache_obj->stop();
     // u_sess->stream_cxt.trace_cache_obj->print_average_stats();
     return p_out_batch;

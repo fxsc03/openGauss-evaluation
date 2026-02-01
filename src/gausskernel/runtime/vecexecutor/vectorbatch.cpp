@@ -523,6 +523,10 @@ void VectorBatch::Reset(bool reset_flag)
             securec_check(rc, "\0", "\0");
         }
     }
+    if (producer_col_numa) {
+        free(producer_col_numa);
+        producer_col_numa = NULL;
+    }
 }
 
 void VectorBatch::ResetSelection(bool value)

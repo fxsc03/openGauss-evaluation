@@ -21,6 +21,9 @@
  *
  * -------------------------------------------------------------------------
  */
+#include <time.h>
+#include <numa.h>
+#include <numaif.h>
 #include "postgres.h"
 
 #include "access/gtm.h"
@@ -117,7 +120,7 @@ int StreamMain()
     CodeGenThreadInitialize();
 #endif
     (void)MemoryContextSwitchTo(oldMemory);
-    
+
     /* We can now handle ereport(ERROR) */
     t_thrd.log_cxt.PG_exception_stack = &local_sigjmp_buf;
 
@@ -142,8 +145,70 @@ int StreamMain()
 
         /* Wait thread ID ready */
         u_sess->stream_cxt.producer_obj->waitThreadIdReady();
-        // u_sess->stream_cxt.trace_cache_obj = new ThreadPerfCacheProfiler();
-        //u_sess->stream_cxt.trace_tsc_obj = new ThreadTSCProfiler();
+        StreamProducer* prod = u_sess->stream_cxt.producer_obj;
+        //for thread migration
+// {
+//         if (unlikely(prod != NULL)) {
+//             if (!prod->numa_recorded) {
+//                 prod->worker_tid = (pid_t)syscall(SYS_gettid);
+//                 int cpu = sched_getcpu();
+
+//                 // ---- 记录 NUMA / streamID 信息 ----
+//                 int streamId = prod->m_streamNode->scan.plan.plan_node_id;
+
+//                 // 可以保留 home_numa 逻辑，但不做实际绑定
+//                 // int num_parallel_streams = 2; // 仅用于记录/划分参考
+//                 // int numa = streamId % num_parallel_streams;
+//                 int numa_node = (cpu % 96) / 24;
+//                 prod->home_numa = numa_node;
+
+//                 prod->numa_recorded = true;
+
+//                 // elog(LOG, "[STREAM-NUMA] stream=%d tid=%d cpu=%d home_numa=%d",
+//                 //     streamId,
+//                 //     prod->worker_tid,
+//                 //     cpu,
+//                 //     prod->home_numa);
+//                 // -----------------------
+//             }
+//         }
+// }
+        //for cache aware
+        // if (unlikely(u_sess->stream_cxt.producer_obj != NULL)) {
+        // // int planNodeId =
+
+        //     int key =  u_sess->stream_cxt.producer_obj
+        //         ->m_streamNode
+        //         ->scan.plan.plan_node_id;
+        //     if (key == 13|| key == 19) {
+        //         cpu_set_t cpuset;
+        //         CPU_ZERO(&cpuset);
+
+        //         if (key == 13) {
+        //             /* NUMA node0 + node1
+        //             * CPU 0–47, 96–143
+        //             */
+        //             for (int i = 0; i <= 80; i++)
+        //                 CPU_SET(i, &cpuset);
+        //             for (int i = 96; i <= 143; i++)
+        //                 CPU_SET(i, &cpuset);
+
+        //             // elog(LOG, "[NUMA-BIND] plan_node_id+1=4 -> bind node0+1");
+        //         } else {
+        //             /* NUMA node2 + node3
+        //             * CPU 48–95, 144–191
+        //             */
+        //             for (int i = 48; i <= 95; i++)
+        //                 CPU_SET(i, &cpuset);
+        //             for (int i = 112; i <= 191; i++)
+        //                 CPU_SET(i, &cpuset);
+
+        //             // elog(LOG, "[NUMA-BIND] plan_node_id %d",planNodeId);
+        //         }
+
+        //         sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+        //     }
+        // }
         execute_stream_plan(u_sess->stream_cxt.producer_obj);
         // elog(LOG,"nodeid %d",u_sess->stream_cxt.producer_obj->m_streamNode->scan.plan.plan_node_id);
         // u_sess->stream_cxt.trace_cache_obj->print_average_stats();

@@ -1,0 +1,196 @@
+From e4b6f10ed4890a990e4bc3069a08d5f083f859f3 Mon Sep 17 00:00:00 2001
+From: songsihui <song.sihui@foxmail.com>
+Date: Sat, 15 Nov 2025 10:57:19 +0800
+Subject: [PATCH 3/4] fix
+
+---
+ .../communication/libcomm_utils/libcomm_memory.cpp | 26 ++++++++
+ src/gausskernel/process/stream/streamMain.cpp      |  1 +
+ src/include/distributelayer/streamProducer.h       | 69 +++++++++++++++++-----
+ src/include/vecexecutor/vectorbatch.h              |  2 +
+ 4 files changed, 84 insertions(+), 14 deletions(-)
+
+diff --git a/src/gausskernel/cbb/communication/libcomm_utils/libcomm_memory.cpp b/src/gausskernel/cbb/communication/libcomm_utils/libcomm_memory.cpp
+index 133ab64..f37bdd9 100755
+--- a/src/gausskernel/cbb/communication/libcomm_utils/libcomm_memory.cpp
++++ b/src/gausskernel/cbb/communication/libcomm_utils/libcomm_memory.cpp
+@@ -111,6 +111,7 @@ void gs_memory_init_entry(StreamSharedContext* sharedContext, int consumerNum, i
+ 
+     sharedContext->poll_entrys = poll_entrys;
+     sharedContext->quota_entrys = quota_entrys;
++
+ }
+ 
+ /*
+@@ -243,6 +244,15 @@ void gs_memory_send(
+     if (sharedContext->vectorized) {
+         Assert(sharedContext->sharedBatches != NULL);
+         batch = sharedContext->sharedBatches[nthChannel][u_sess->stream_cxt.smp_id];
++
++        // 当前线程 CPU
++        int src_cpu = sched_getcpu();
++        // 映射 NUMA
++        int src_numa = cpu_to_numa_node(src_cpu);
++
++        batch->producer_cpu  = src_cpu;
++        batch->producer_numa = src_numa;
++
+         /* data copy */
+         if (-1 == nthRow) {
+             /* Do deep copy of all rows, for local roundrobin & local broadcast. */
+@@ -345,6 +355,22 @@ bool gs_consume_memory_data(StreamState* node, int loc)
+ 
+         batchdst->Copy<true, false>(batchsrc);
+ 
++        // 获取目标 CPU/NUMA
++        int dst_cpu  = sched_getcpu();
++        int dst_numa = cpu_to_numa_node(dst_cpu);
++
++        // 获取生产端 CPU/NUMA
++        int src_cpu  = batchsrc->producer_cpu;
++        int src_numa = batchsrc->producer_numa;   
++
++        elog(LOG,
++            "[BatchPath] smp=%d loc=%d "
++            "src={cpu=%d numa=%d} -> dst={cpu=%d numa=%d} rows=%d",
++            u_sess->stream_cxt.smp_id, loc,
++            src_cpu, src_numa,
++            dst_cpu, dst_numa,
++            batchsrc->m_rows);
++
+         batchsrc->Reset();
+     } else {
+         TupleVector* tuplesrc = sharedContext->sharedTuples[u_sess->stream_cxt.smp_id][loc];
+diff --git a/src/gausskernel/process/stream/streamMain.cpp b/src/gausskernel/process/stream/streamMain.cpp
+index 9796ebb..a728f1f 100755
+--- a/src/gausskernel/process/stream/streamMain.cpp
++++ b/src/gausskernel/process/stream/streamMain.cpp
+@@ -147,6 +147,7 @@ int StreamMain()
+         execute_stream_plan(u_sess->stream_cxt.producer_obj);
+         // elog(LOG,"nodeid %d",u_sess->stream_cxt.producer_obj->m_streamNode->scan.plan.plan_node_id);
+         // u_sess->stream_cxt.trace_cache_obj->print_average_stats();
++        u_sess->stream_cxt.producer_obj->m_sendMonitor->PrintStat();
+         execute_stream_end(u_sess->stream_cxt.producer_obj);
+         WLMReleaseNodeFromHash();
+         WLMReleaseIoInfoFromHash();
+diff --git a/src/include/distributelayer/streamProducer.h b/src/include/distributelayer/streamProducer.h
+index 65513f4..2bd5a70 100644
+--- a/src/include/distributelayer/streamProducer.h
++++ b/src/include/distributelayer/streamProducer.h
+@@ -27,6 +27,7 @@
+ 
+ #include "distributelayer/streamCore.h"
+ 
++
+ #define VALUE_TYPE 0
+ #define NUMERIC_TYPE 1
+ #define VARLENA_TYPE 2
+@@ -35,6 +36,29 @@
+ #define FIXED_TYPE 5
+ #define NAME_TYPE 6
+ 
++inline int cpu_to_numa_node(int cpu)
++{
++    if (cpu < 0) return -1;
++
++    // node0: 0-23, 96-119
++    if ((cpu >= 0 && cpu <= 23) || (cpu >=96 && cpu <=119))
++        return 0;
++
++    // node1: 24-47, 120-143
++    if ((cpu >=24 && cpu <=47) || (cpu >=120 && cpu <=143))
++        return 1;
++
++    // node2: 48-71, 144-167
++    if ((cpu >=48 && cpu <=71) || (cpu >=144 && cpu <=167))
++        return 2;
++
++    // node3: 72-95, 168-191
++    if ((cpu >=72 && cpu <=95) || (cpu >=168 && cpu <=191))
++        return 3;
++
++    return -1; // fallback
++}
++
+ /* 轻量统计结构体，用于记录 producer 的发送性能 */
+ /*
+  * StreamSendMonitor
+@@ -108,31 +132,48 @@ public:
+      *   - 平均单批 copy 耗时（us）
+      *   - Producer 存活总时长（秒）
+      */
++
+     void PrintStat()
+     {
+-        printf("printStat");
+-        ereport(DEBUG1, (errmsg("PrintStat called: batches=%lu bytes=%lu", m_totalBatches, m_totalBytes)));
++        // 调试输出（可见即可）
++        elog(DEBUG1, "PrintStat called: batches=%lu bytes=%lu",
++            m_totalBatches, m_totalBytes);
++
++        // 获取线程 ID（真正的 TID）
++        pid_t tid = syscall(SYS_gettid);
++
++        // 获取当前 CPU ID
++        int cpu = sched_getcpu();
++
++        // 直接根据 CPU 推算 NUMA node
++        int node = cpu_to_numa_node(cpu);
++
++        // 计算时间
+         struct timeval endTime;
+         gettimeofday(&endTime, NULL);
+ 
+-        // 计算监控持续时间（微秒）
+         double duration = (endTime.tv_sec - m_startTime.tv_sec) * 1e6 +
+-                          (endTime.tv_usec - m_startTime.tv_usec);
++                      (endTime.tv_usec - m_startTime.tv_usec);
+ 
++        // 正常输出统计
+         if (m_totalBatches > 0) {
+-            ereport(LOG,
+-                (errmodule(MOD_STREAM),
+-                 errmsg("[StreamMonitor] Producer=%s "
+-                        "Batches=%lu Bytes=%lu "
+-                        "AvgSendTime=%.2fus TotalTime=%.2fs",
+-                        m_name,
+-                        m_totalBatches,
+-                        m_totalBytes,
+-                        m_totalTimeUs / m_totalBatches, // 平均每批 copy 时间
+-                        duration / 1e6)));              // 总运行时间（秒）
++            elog(LOG,
++                "[StreamMonitor] Producer=%s "
++                "TID=%d CPU=%d NUMA=%d "
++                "Batches=%lu Bytes=%lu "
++                "AvgSendTime=%.2fus TotalTime=%.2fs",
++                m_name,
++                tid,
++                cpu,
++                node,
++                m_totalBatches,
++                m_totalBytes,
++                m_totalTimeUs / m_totalBatches,
++                duration / 1e6);
+         }
+     }
+ 
++
+ private:
+     char m_name[NAMEDATALEN];  // producer 名称或标识符
+     uint64 m_totalBatches;     // 累积 batch 数
+diff --git a/src/include/vecexecutor/vectorbatch.h b/src/include/vecexecutor/vectorbatch.h
+index 802f198..43ea20d 100644
+--- a/src/include/vecexecutor/vectorbatch.h
++++ b/src/include/vecexecutor/vectorbatch.h
+@@ -345,6 +345,8 @@ struct SysColContainer : public BaseObject {
+ //
+ class VectorBatch : public BaseObject {
+ public:
++    int producer_cpu=0;    // 生产端 CPU
++    int producer_numa=0;   // 生产端 NUMA
+     // number of rows in the batch.
+     //
+     int m_rows;
+-- 
+1.8.3.1
+
