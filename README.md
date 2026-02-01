@@ -208,6 +208,14 @@ This monitor hooks into the `gs_memory_send()` function and periodically records
 **Log Analysis:**
 The collected metrics are output to the system logs located in `/data/pg_log`. Search for entries containing monitor-specific tags to extract performance data.
 
+## Experimental Data Availability
+
+We provide the complete experimental datasets used in the paper within the `openGauss-server/data` directory. Readers interested in the detailed results corresponding to **Sections 4, 5, and 6** can access the raw data files there.
+
+## Reproducibility & Benchmarking
+
+To facilitate the reproduction of our results, we have included the TPC-H benchmarking scripts in the `openGauss-server/test` directory. Users can configure these scripts according to their local environment specifications to conduct TPC-H performance testing.
+
 ## Citation
 
 ```bibtex
