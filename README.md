@@ -220,7 +220,7 @@ To facilitate the reproduction of our results, we have included the TPC-H benchm
 
 ```bibtex
 @article{YourPaperTitle,
-  title={Inter-Operator Interaction Matters: Revisiting Query Scalability of Vectorized OLAP Engines on Many-Core NUMA Servers},
+  title={Revisiting Query Scalability of Vectorized OLAP Engines on Many-Core NUMA Servers},
   author={Authors Name},
   journal={Proceedings of the VLDB Endowment},
   year={2026},
